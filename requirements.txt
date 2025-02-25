@@ -1,0 +1,4 @@
+aiogram
+python-dotenv
+whisper
+psutil
