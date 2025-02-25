@@ -1,6 +1,6 @@
-# Inervoice
+# InnerVoice
 
-Inervoice is a Telegram bot that transcribes and translates voice messages using OpenAI's Whisper model. Built with [aiogram](https://docs.aiogram.dev) and other Python libraries, the bot processes incoming voice messages, converts them to WAV format via `ffmpeg`, and then uses Whisper to generate both a transcription and a translation.
+InnerVoice is a Telegram bot that transcribes and translates voice messages using OpenAI's Whisper model. Built with [aiogram](https://docs.aiogram.dev) and other Python libraries, the bot processes incoming voice messages, converts them to WAV format via `ffmpeg`, and then uses Whisper to generate both a transcription and a translation.
 
 ---
 
