@@ -1,4 +1,4 @@
 aiogram
 python-dotenv
-whisper
+openai-whisper
 psutil
