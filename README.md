@@ -65,7 +65,7 @@ The bot is designed for reproducibility and ease of deployment on various server
 
 # Requirements
 
-The following is an example of a complete `requirements.txt` file:
+The complete `requirements.txt` file:
 
 ```
 aiogram
@@ -110,25 +110,6 @@ psutil
 
 ---
 
-### System Requirements
-
-The performance of Inervoice depends on the Whisper model variant selected. See the guide below:
-
-|**Model Variant**|**CPU Requirements**|**Memory (RAM)**|**GPU (Optional)**|**Notes**|
-|---|---|---|---|---|
-|**Tiny**|2+ cores|≥ 2 GB|Not required|Fastest response; lower accuracy. Ideal for low-resource devices.|
-|**Base**|2+ cores|≥ 2–3 GB|Not required|Improved accuracy over Tiny; minimal resource use.|
-|**Small**|4+ cores|≥ 4 GB|Beneficial: ~2–3 GB VRAM if using GPU|Balances speed and accuracy well.|
-|**Medium**|4–8 cores|≥ 8 GB|Recommended: at least 4 GB VRAM for GPU use|Better accuracy; default model used in Inervoice.|
-|**Large**|8+ cores|≥ 16 GB|Strongly recommended: high-end GPU (≥ 8 GB VRAM)|Highest accuracy; most resource intensive.|
-
-> **System Tool Note:**
-> 
-> - **ffmpeg:** Must be installed on your server for audio conversion.
-> - **ionice:** Typically included in the util-linux package on Linux systems.
-
----
-
 ## Installation & Deployment
 
 ### 1. Clone or Download the Repository
@@ -159,6 +140,11 @@ Alternatively, you can download the ZIP file directly from the GitHub page.
 
 ### 4. Run the Bot
 
+**Activate the Virtual Environment:**
+    
+    ```bash
+    source venv/bin/activate
+    ```
 Start the bot with:
 
 ```bash
@@ -179,12 +165,6 @@ This command will:
 - Redirect both standard output and error to `bot.log`.
 
 #### Managing the Bot
-
-- **Activate the Virtual Environment:**
-    
-    ```bash
-    source venv/bin/activate
-    ```
     
 - **Restarting the Bot:**
     
@@ -214,7 +194,6 @@ This command will:
     tail -f bot.log
     ```
     
-
 ---
 
 ## Usage
@@ -232,6 +211,24 @@ This command will:
 3. **Logging:**  
     Refer to `bot.log` for detailed logs and troubleshooting information.
     
+---
+
+### System Requirements
+
+The performance of Inervoice depends on the Whisper model variant selected. See the guide below:
+
+|**Model Variant**|**CPU Requirements**|**Memory (RAM)**|**GPU (Optional)**|**Notes**|
+|---|---|---|---|---|
+|**Tiny**|2+ cores|≥ 2 GB|Not required|Fastest response; lower accuracy. Ideal for low-resource devices.|
+|**Base**|2+ cores|≥ 2–3 GB|Not required|Improved accuracy over Tiny; minimal resource use.|
+|**Small**|4+ cores|≥ 4 GB|Beneficial: ~2–3 GB VRAM if using GPU|Balances speed and accuracy well.|
+|**Medium**|4–8 cores|≥ 8 GB|Recommended: at least 4 GB VRAM for GPU use|Better accuracy; default model used in Inervoice.|
+|**Large**|8+ cores|≥ 16 GB|Strongly recommended: high-end GPU (≥ 8 GB VRAM)|Highest accuracy; most resource intensive.|
+
+> **System Tool Note:**
+> 
+> - **ffmpeg:** Must be installed on your server for audio conversion.
+> - **ionice:** Typically included in the util-linux package on Linux systems.
 
 ---
 
