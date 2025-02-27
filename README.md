@@ -2,55 +2,25 @@
 
 InnerVoice is a Telegram bot that transcribes and translates voice messages using OpenAI's Whisper model. Built with [aiogram](https://docs.aiogram.dev) and other Python libraries, the bot processes incoming voice messages, converts them to WAV format via `ffmpeg`, and then uses Whisper to generate both a transcription and a translation.
 
----
-
 ## Table of Contents
 
 - [Overview](#overview)
-- [How the Bot Works](#how-the-bot-works)
 - [Features](#features)
 - [Requirements](#requirements)
-- [System Requirements](#system-requirements)
 - [Installation & Deployment](#installation--deployment)
 - [Usage](#usage)
 - [Customization & Contributing](#customization--contributing)
-
 
 ---
 
 ## Overview
 
-Inervoice enables Telegram users to simply send a voice message and receive:
+InnerVoice enables Telegram users to simply send a voice message and receive:
 
 - A **transcription** of the audio.
 - A **translation** of the spoken content.
 
 The bot is designed for reproducibility and ease of deployment on various servers. You can clone or download the repository and follow the instructions below to set up your environment.
-
----
-
-## How the Bot Works
-
-1. **Environment & Configuration:**
-   - Reads configuration details (e.g., the `BOT_TOKEN`) from an `.env` file.
-   - Logs activities and errors in `bot.log`.
-
-2. **Message Handling:**
-   - Responds to the `/start` command with a welcome message and instructions.
-   - Downloads incoming voice messages into an `audios/` directory.
-
-3. **Audio Processing:**
-   - Converts the OGG audio file to WAV using `ffmpeg` combined with `ionice` for lower CPU priority.
-   - Processes audio files sequentially using a queue system to efficiently manage system resources.
-
-4. **Transcription & Translation:**
-   - Uses the Whisper model (default: "medium") to transcribe the WAV file.
-   - Generates a translation of the transcription.
-   - Returns both outputs along with processing metrics such as time, CPU usage, and memory usage.
-
-5. **Resource Management:**
-   - Checks CPU usage before processing to prevent system overload.
-   - Deletes temporary audio files after processing to conserve disk space.
 
 ---
 
@@ -63,158 +33,133 @@ The bot is designed for reproducibility and ease of deployment on various server
 
 ---
 
-# Requirements
+## Requirements
 
-The complete `requirements.txt` file:
+The bot requires:
 
-```
-aiogram
-python-dotenv
-openai-whisper
-psutil
-```
+- **Python 3.8+**
+- **ffmpeg** for audio conversion
+- **A Telegram Bot API Token** (generated via BotFather)
+- **Linux/macOS/Windows environment**
 
 ### System Dependencies
 
-- **ffmpeg:**
-    
-    - **Installation:**
-        - **Ubuntu/Debian:**
-            
-            ```bash
-            sudo apt update
-            sudo apt install ffmpeg
-            ```
-            
-        - **macOS (Homebrew):**
-            
-            ```bash
-            brew install ffmpeg
-            ```
-            
-        - **Windows:** Download the binary from the [official website](https://ffmpeg.org/download.html) and add it to your system's PATH.
-    - **Usage:**  
-        Required to convert OGG audio files to WAV format before transcription.
-- **ionice:**
-    
-    - **Installation:**
-        - **Ubuntu/Debian:**
-            
-            ```bash
-            sudo apt update
-            sudo apt install util-linux
-            ```
-            
-    - **Usage:**  
-        Ensures `ffmpeg` runs with lower CPU priority to manage system resources efficiently.
+Ensure the following packages are installed before running the bot:
+
+```bash
+sudo apt update
+sudo apt install python3-venv
+sudo apt install ffmpeg
+sudo apt install util-linux
+```
+
+> **Note:** `ffmpeg` is required to convert OGG voice messages to WAV format. `util-linux` provides `ionice` for resource-aware processing.
 
 ---
 
 ## Installation & Deployment
 
-### 1. Clone or Download the Repository
-
-Since this is a public repository, you can clone it via Git:
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/arkano1dev/InnerVoice.git
-````
+cd InnerVoice
+```
 
-Alternatively, you can download the ZIP file directly from the GitHub page.
+### 2. Set Up the Virtual Environment
 
-### 2. Install Python & Dependencies
+```bash
+python3 -m venv venv
+source venv/bin/activate  # For Linux/macOS
+venv\Scripts\activate    # For Windows (Command Prompt)
+```
 
-- Ensure you have Python 3.8 or newer installed.
-    
-- Install the required packages:
-    
-    ```bash
-    pip install -r requirements.txt
-    ```
-    
+### 3. Install Dependencies
 
-### 3. Set Up the Environment
+#### **For CPU (No CUDA/GPU)**
+```bash
+pip install aiogram python-dotenv psutil
+pip install openai-whisper --no-cache-dir
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+```
 
-- Create a `.env` file in the repository root by copying from `.env.example`.
-- Add your Telegram Bot API key and any other required configuration.
+#### **For GPU (CUDA Support)**
+```bash
+pip install -r requirements.txt
+```
 
-### 4. Run the Bot
+> **Note:** The `requirements.txt` includes the standard installation with CUDA support. If you are running the bot on a system without a GPU, follow the CPU installation steps instead.
 
-**Activate the Virtual Environment:**
-    
-    ```bash
-    source venv/bin/activate
-    ```
-Start the bot with:
+### 4. Set Up Environment Variables
+
+Create a `.env` file inside the `InnerVoice` folder:
+
+```bash
+echo 'BOT_TOKEN=your_telegram_token_here' > .env
+```
+
+Replace `your_telegram_token_here` with your actual Telegram Bot API key.
+
+---
+
+## Running the Bot
+
+### 1. Activate the Virtual Environment
+
+Each time you start the bot, activate the virtual environment:
+
+```bash
+source venv/bin/activate  # Linux/macOS
+venv\Scripts\activate    # Windows
+```
+
+### 2. Start the Bot
 
 ```bash
 python3 bot.py
 ```
 
-#### Running in the Background with nohup
+### 3. Running in the Background (Linux)
 
-To keep the bot running after closing your terminal:
+To keep the bot running after closing the terminal:
 
 ```bash
 nohup python3 bot.py > bot.log 2>&1 &
 ```
 
-This command will:
+> **nohup** ensures the bot continues running in the background.
 
-- Run the bot in the background.
-- Redirect both standard output and error to `bot.log`.
+To stop the bot:
+        
+```bash
+pkill -f bot.py
+```
 
-#### Managing the Bot
-    
-- **Restarting the Bot:**
-    
-    1. Stop the bot:
-        
-        ```bash
-        pkill -f bot.py
-        ```
-        
-    2. Activate the virtual environment (if not already active):
-        
-        ```bash
-        source venv/bin/activate
-        ```
-        
-    3. Restart the bot:
-        
-        ```bash
-        nohup python3 bot.py > bot.log 2>&1 &
-        ```
-        
-- **Viewing Logs:**
-    
-    You can view the log file in real-time using:
-    
-    ```bash
-    tail -f bot.log
-    ```
-    
+### 4. Checking Logs
+
+Monitor the bot logs using:
+
+```bash
+tail -f bot.log
+```
 ---
 
 ## Usage
 
-1. **Starting the Bot:**  
-    Run `python3 bot.py` after setting up your environment.
-    
+1. **Start the Bot:**
+   - Run `python3 bot.py` after setting up your environment.
+
 2. **Interacting via Telegram:**
-    
-    - Send the `/start` command to receive a welcome message.
-    - Send a voice message. The bot will:
-        - Download and convert the audio.
-        - Process the audio using the Whisper model.
-        - Return the transcription and translation along with processing metrics (time, CPU usage, and memory usage).
-3. **Logging:**  
-    Refer to `bot.log` for detailed logs and troubleshooting information.
-    
+   - Send the `/start` command to receive a welcome message.
+   - Send a voice message. The bot will:
+     - Download and convert the audio.
+     - Process the audio using the Whisper model.
+     - Return the transcription and translation.
+
+3. **Logging:**
+   - Refer to `bot.log` for detailed logs and troubleshooting information.
+
 ---
-
-### System Requirements
-
 The performance of Inervoice depends on the Whisper model variant selected. See the guide below:
 
 |**Model Variant**|**CPU Requirements**|**Memory (RAM)**|**GPU (Optional)**|**Notes**|
@@ -225,24 +170,23 @@ The performance of Inervoice depends on the Whisper model variant selected. See 
 |**Medium**|4–8 cores|≥ 8 GB|Recommended: at least 4 GB VRAM for GPU use|Better accuracy; default model used in Inervoice.|
 |**Large**|8+ cores|≥ 16 GB|Strongly recommended: high-end GPU (≥ 8 GB VRAM)|Highest accuracy; most resource intensive.|
 
-> **System Tool Note:**
-> 
-> - **ffmpeg:** Must be installed on your server for audio conversion.
-> - **ionice:** Typically included in the util-linux package on Linux systems.
+---
+## Customization & Contributing
+
+- **Change Model Variant:**
+  Modify the following line in `bot.py` to use a different Whisper model:
+  
+  ```python
+  model = whisper.load_model("medium")
+  ```
+  
+  Replace `"medium"` with `"tiny"`, `"base"`, `"small"`, or `"large"`.
+
+- **Contributions:**
+  Contributions are welcome! Please open an issue or submit a pull request for improvements.
 
 ---
 
-## Customization & Contributing
+## License
 
-- **Change Model Variant:**  
-    To select a different Whisper model, modify the following line in `bot.py`:
-    
-    ```python
-    model = whisper.load_model("medium")
-    ```
-    
-    Replace `"medium"` with `"tiny"`, `"base"`, `"small"`, or `"large"` based on your resource availability and accuracy needs.
-    
-- **Contributions:**  
-    Contributions are welcome! Please open an issue or submit a pull request if you have improvements or bug fixes.
-    
+This project is licensed under the MIT License. Feel free to use and modify it as needed.
