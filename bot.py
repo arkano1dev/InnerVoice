@@ -6,6 +6,7 @@ import subprocess
 import psutil
 import time
 import shutil
+import tiktoken
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.client.default import DefaultBotProperties
@@ -21,9 +22,9 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
 # Adjust these constants
-TELEGRAM_TIMEOUT = 60  # Seconds for Telegram API calls
+TELEGRAM_TIMEOUT = 200  # Seconds for Telegram API calls
 PROCESSING_UPDATE_INTERVAL = 30  # Seconds between processing status updates
-MAX_SEGMENT_RETRIES = 3
+MAX_SEGMENT_RETRIES = 5
 
 # Ensure bot instance is created first
 bot = Bot(
@@ -202,6 +203,12 @@ async def send_heartbeat(user_id: int, file_id: str):
         finally:
             await asyncio.sleep(PROCESSING_UPDATE_INTERVAL)
 
+def count_tokens(text: str, model: str = "gpt-4"):
+    """Count the number of tokens in a given text for a specified model."""
+    encoding = tiktoken.encoding_for_model(model)
+    return len(encoding.encode(text))
+
+
 async def process_audio_async(user_id, file_id, file_path):
     wav_path = Path(file_path).with_suffix('.wav')
     cpu_monitor = CPUMonitor()
@@ -226,9 +233,9 @@ async def process_audio_async(user_id, file_id, file_path):
             return
             
         # Calculate initial ETA (assuming ~30 seconds per segment as baseline)
-        estimated_time = len(segments) * 30  # 30 seconds per segment baseline
+        estimated_time = len(segments) * 30  
         
-        # Single initial message with all info
+        # Initial processing status message
         initial_msg = (
             f"✅ Audio received\n"
             f"📊 Segments to process: {len(segments)}\n"
@@ -237,13 +244,15 @@ async def process_audio_async(user_id, file_id, file_path):
         )
         await send_message_safe(user_id, initial_msg)
         
-        # Rest of the processing code remains the same, but without segment progress messages
+        # Start CPU monitoring
         start_time = time.time()
         resources_before = await get_system_resources()
         monitor_task = asyncio.create_task(cpu_monitor.monitor())
         
         full_transcription = ""
         full_translation = ""
+        transcription_tokens = 0
+        translation_tokens = 0
         
         for i, segment in enumerate(segments, 1):
             try:
@@ -252,8 +261,11 @@ async def process_audio_async(user_id, file_id, file_path):
                 
                 if transcription.strip():
                     full_transcription += transcription
+                    transcription_tokens += count_tokens(transcription)
+
                 if translation.strip():
                     full_translation += translation
+                    translation_tokens += count_tokens(translation)
                     
             except Exception as e:
                 logging.error(f"Error processing segment {i}: {e}")
@@ -261,11 +273,15 @@ async def process_audio_async(user_id, file_id, file_path):
             finally:
                 Path(segment).unlink(missing_ok=True)
         
-        # Rest of the existing code for results and statistics...
+        # Stop CPU monitoring
+        cpu_monitor.stop()
+        await monitor_task
+        
+        # Calculate elapsed time and resource usage
         elapsed_time = time.time() - start_time
         resources_after = await get_system_resources()
         
-        # Send results with all original logging
+        # Send results
         if full_transcription.strip():
             await send_message_safe(user_id, "📄 Transcription:")
             await send_message_safe(user_id, full_transcription.strip())
@@ -274,11 +290,13 @@ async def process_audio_async(user_id, file_id, file_path):
             await send_message_safe(user_id, "🌍 Translation:")
             await send_message_safe(user_id, full_translation.strip())
         
-        # Enhanced statistics with all original metrics
+        # Processing statistics
         stats_msg = (
             f"📊 Processing Statistics:\n"
             f"🕒 Total Time: {elapsed_time:.2f}s\n"
             f"📊 Segments: {len(segments)}\n"
+            f"📝 Transcription Tokens: {transcription_tokens}\n"
+            f"🌍 Translation Tokens: {translation_tokens}\n"
             f"🖥️ CPU: {resources_before.cpu_percent:.1f}% ➡️ {resources_after.cpu_percent:.1f}%\n"
             f"💾 RAM: {resources_before.memory_percent:.1f}% ➡️ {resources_after.memory_percent:.1f}%\n"
             f"💿 Disk: {resources_before.disk_percent:.1f}%"
@@ -297,6 +315,7 @@ async def process_audio_async(user_id, file_id, file_path):
         Path(wav_path).unlink(missing_ok=True)
         processing_states.pop(file_id, None)
         audio_queue.task_done()
+
 
 async def audio_worker():
     while True:
@@ -348,7 +367,6 @@ async def split_audio(wav_path: Path) -> List[Path]:
         raise RuntimeError(f"Failed to split audio: {e}")
 
 async def main():
-    """Enhanced main function with better error handling."""
     audio_worker_task = asyncio.create_task(audio_worker())
     
     while True:

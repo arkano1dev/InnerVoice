@@ -79,6 +79,7 @@ venv\Scripts\activate    # For Windows (Command Prompt)
 #### **For CPU (No CUDA/GPU)**
 ```bash
 pip install aiogram python-dotenv psutil
+pip install tiktoken
 pip install openai-whisper --no-cache-dir
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 ```
