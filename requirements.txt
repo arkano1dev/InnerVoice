@@ -2,3 +2,4 @@ aiogram
 python-dotenv
 openai-whisper
 psutil
+tiktoken
