@@ -322,17 +322,88 @@ async def audio_worker():
         user_id, file_id, file_path = await audio_queue.get()
         await process_audio_async(user_id, file_id, file_path)
 
-@dp.message(CommandStart())
-async def start(message: types.Message):
-    await message.answer(
-        "👋 Welcome to InnerVoice Bot!\n"
-        "🎙️ Just send a voice message, and I’ll transcribe it to text and translate it to English.\n"
-        "✅ Fast, private, and completely free.\n\n"
-        "👋 ¡Bienvenido a InnerVoice Bot!\n"
-        "🎙️ Solo envía un mensaje de voz y lo transcribiré a texto y lo traduciré al inglés.\n"
-        "✅ Rápido, privado y completamente gratuito.\n\n"
-        "Try it now by sending a voice message!"
-    )
+@dp.message(Command("start"))
+async def start_handler(message: types.Message):
+    lang = message.from_user.language_code
+    if lang == "es":
+        await message.answer(
+            "👋 ¡Bienvenido a InnerVoice!\n\n"
+            "🎙️ Envíame un mensaje de voz y te enviaré la transcripción y una traducción automática.\n"
+            "✅ Simple, rápido y gratuito.\n\n"
+            "¡Pruébalo ahora!"
+        )
+    else:
+        await message.answer(
+            "👋 Welcome to InnerVoice!\n\n"
+            "🎙️ Send me a voice message, and I’ll transcribe and translate it into Spanish.\n"
+            "✅ Simple, fast, and free.\n\n"
+            "Try it now!"
+        )
+
+@dp.message(Command("help"))
+async def help_handler(message: types.Message):
+    lang = message.from_user.language_code
+    if lang == "es":
+        await message.answer(
+            "ℹ️ *¿Cómo usar InnerVoice?*\n\n"
+            "1. Graba y envía un mensaje de voz.\n"
+            "2. Recibirás el texto transcrito y una traducción al inglés.\n"
+            "3. Úsalo para estudiar, guardar ideas, o comunicarte mejor.\n\n"
+            "📌 Solo funciona con mensajes de voz, no llamadas ni videos.",
+            parse_mode="Markdown"
+        )
+    else:
+        await message.answer(
+            "ℹ️ *How to use InnerVoice?*\n\n"
+            "1. Record and send a voice message.\n"
+            "2. You’ll get a transcription and a translation into spanish.\n"
+            "3. Use it for studying, capturing ideas, or better communication.\n\n"
+            "📌 Only works with voice messages, not calls or videos.",
+            parse_mode="Markdown"
+        )
+
+@dp.message(Command("about"))
+async def about_handler(message: types.Message):
+    lang = message.from_user.language_code
+    if lang == "es":
+        await message.answer(
+            "📚 *Acerca de InnerVoice*\n\n"
+            "Este bot convierte tus mensajes de voz en texto y luego traduce ese texto automáticamente.\n\n"
+            "Usa modelos de inteligencia artificial para ofrecer transcripciones precisas y traducciones confiables.\n\n"
+            "🔗 Código fuente: [github.com/arkano1dev/InnerVoice](https://github.com/arkano1dev/InnerVoice)",
+            parse_mode="Markdown"
+        )
+    else:
+        await message.answer(
+            "📚 *About InnerVoice*\n\n"
+            "This bot converts your voice messages into text and then automatically translates that text.\n\n"
+            "It uses AI models to provide accurate transcriptions and reliable translations.\n\n"
+            "🔗 Source code: [github.com/arkano1dev/InnerVoice](https://github.com/arkano1dev/InnerVoice)",
+            parse_mode="Markdown"
+        )
+@dp.message(Command("contribute"))
+async def contribute_handler(message: types.Message):
+    lang = message.from_user.language_code
+    if lang == "es":
+        await message.answer(
+            "💖 *Apoya el desarrollo de InnerVoice*\n\n"
+            "Si encuentras útil este bot y quieres apoyar su mantenimiento y mejora, puedes contribuir con una donación:\n\n"
+            "🟠 *Bitcoin (on-chain)*: `bc1qwktevffc57rkk8lwyd6yqwxrvcd4vjxggcpsrn`\n"
+            "⚡ *Lightning Address*: `buffswan6@primal.net`\n"
+            "⚡ *Nostr*: `npub1p2x3t3njq44vsk24qjkauzurvfd59c224qyu2mpgu9jverk9tfrqnz0ql5`\n\n"
+            "¡Gracias por tu apoyo! 🙌",
+            parse_mode="Markdown"
+        )
+    else:
+        await message.answer(
+            "💖 *Support InnerVoice Development*\n\n"
+            "If you find this bot useful and want to help keep it running and improving, consider a small donation:\n\n"
+            "🟠 *Bitcoin (on-chain)*: `bc1qwktevffc57rkk8lwyd6yqwxrvcd4vjxggcpsrn`\n"
+            "⚡ *Lightning Address*: `buffswan6@primal.net`\n"
+            "⚡ *Nostr*: `npub1p2x3t3njq44vsk24qjkauzurvfd59c224qyu2mpgu9jverk9tfrqnz0ql5`\n\n"
+            "Thanks for your support! 🙌",
+            parse_mode="Markdown"
+        )
 
 
 @dp.message(F.voice)
