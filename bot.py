@@ -324,7 +324,16 @@ async def audio_worker():
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    await message.answer("Send a voice message and I'll transcribe it.")
+    await message.answer(
+        "👋 Welcome to InnerVoice Bot!\n"
+        "🎙️ Just send a voice message, and I’ll transcribe it to text and translate it to English.\n"
+        "✅ Fast, private, and completely free.\n\n"
+        "👋 ¡Bienvenido a InnerVoice Bot!\n"
+        "🎙️ Solo envía un mensaje de voz y lo transcribiré a texto y lo traduciré al inglés.\n"
+        "✅ Rápido, privado y completamente gratuito.\n\n"
+        "Try it now by sending a voice message!"
+    )
+
 
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
