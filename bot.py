@@ -8,6 +8,7 @@ import time
 import shutil
 import tiktoken
 from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
 from aiogram.filters import CommandStart
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
