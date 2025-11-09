@@ -1,5 +1,5 @@
 aiogram
 python-dotenv
 openai-whisper
-psutil
 tiktoken
+torch --index-url https://download.pytorch.org/whl/cpu

@@ -1,0 +1,458 @@
+import os
+import asyncio
+import logging
+import whisper
+import subprocess
+import time
+import shutil
+import tiktoken
+import os
+import asyncio
+import logging
+import whisper
+import subprocess
+import time
+import tiktoken
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, CommandStart
+from aiogram.client.default import DefaultBotProperties
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from dotenv import load_dotenv
+from datetime import datetime
+from typing import Dict, List
+from pathlib import Path
+from contextlib import suppress
+
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
+
+# Load environment variables
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
+
+# Adjust these constants
+TELEGRAM_TIMEOUT = 200  # Seconds for Telegram API calls
+PROCESSING_UPDATE_INTERVAL = 30  # Seconds between processing status updates
+MAX_SEGMENT_RETRIES = 5
+
+# Ensure bot instance is created first
+bot = Bot(
+    token=TOKEN, 
+    default=DefaultBotProperties(parse_mode=None),
+    session_timeout=TELEGRAM_TIMEOUT,
+    connect_timeout=TELEGRAM_TIMEOUT
+)
+dp = Dispatcher()
+
+# Load Whisper model
+model = whisper.load_model("medium")  
+
+# Directories and logging configuration
+AUDIO_DIR = "audios"
+LOG_FILE = "bot.log"
+os.makedirs(AUDIO_DIR, exist_ok=True)
+
+# Logging configuration
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
+                    format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Queue to process audios in order
+audio_queue = asyncio.Queue()
+
+# Language configuration
+SUPPORTED_LANGUAGES = {
+    'es': {'name': 'Spanish', 'emoji': '🇪🇸', 'local': 'Español'},
+    'en': {'name': 'English', 'emoji': '🇬🇧', 'local': 'English'},
+    'fr': {'name': 'French', 'emoji': '🇫🇷', 'local': 'Français'},
+    'nl': {'name': 'Dutch', 'emoji': '🇳🇱', 'local': 'Nederlands'},
+    'pt': {'name': 'Portuguese', 'emoji': '🇵🇹', 'local': 'Português'},
+    'de': {'name': 'German', 'emoji': '🇩🇪', 'local': 'Deutsch'}
+}
+
+def create_language_keyboard() -> InlineKeyboardMarkup:
+    """Create inline keyboard for language selection."""
+    keyboard = []
+    for code, info in SUPPORTED_LANGUAGES.items():
+        button_text = f"{info['emoji']} {info['local']} ({info['name']})"
+        keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"lang_{code}")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# Default language
+current_language = 'es'
+
+# Global configuration
+CHUNK_SIZE_SECONDS = 30
+processing_states: Dict[str, Dict] = {}
+
+# Removed system monitoring functions as they're no longer needed
+
+async def process_audio_chunk(segment: str, model, task: str = "transcribe") -> str:
+    """Process a single audio chunk with selected language."""
+    try:
+        # Basic Whisper settings for better performance
+        result = model.transcribe(
+            str(segment), 
+            task=task,
+            fp16=False,
+            language=current_language
+        )
+        return result.get("text", "").strip() + " "
+    except Exception as e:
+        logging.error(f"Error processing chunk: {e}")
+        raise
+
+async def send_message_safe(user_id: int, text: str) -> bool:
+    """Safely send a message to user with retry logic."""
+    if not text or text.isspace():
+        logging.warning(f"Attempted to send empty message to {user_id}")
+        return False
+        
+    for attempt in range(3):  # Try 3 times
+        try:
+            if len(text) > 4000:
+                chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+                for chunk in chunks:
+                    if chunk.strip():
+                        with suppress(asyncio.TimeoutError):
+                            await asyncio.wait_for(
+                                bot.send_message(user_id, chunk),
+                                timeout=TELEGRAM_TIMEOUT
+                            )
+                            await asyncio.sleep(0.5)  # Rate limiting prevention
+            else:
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        bot.send_message(user_id, text),
+                        timeout=TELEGRAM_TIMEOUT
+                    )
+            return True
+        except Exception as e:
+            logging.error(f"Error sending message (attempt {attempt + 1}/3): {e}")
+            if attempt < 2:  # Don't sleep on last attempt
+                await asyncio.sleep(2 ** attempt)
+    return False
+
+async def send_heartbeat(user_id: int, file_id: str):
+    """Send periodic updates to keep the connection alive."""
+    while file_id in processing_states:
+        try:
+            state = processing_states[file_id]
+            if state['status'].startswith('processing_segment'):
+                progress = (state['segments_processed'] / state['total_segments'] * 100)
+                msg = f"🔄 Still processing...\nProgress: {progress:.1f}%"
+                await send_message_safe(user_id, msg)
+        except Exception as e:
+            logging.warning(f"Heartbeat error: {e}")
+        finally:
+            await asyncio.sleep(PROCESSING_UPDATE_INTERVAL)
+
+def count_tokens(text: str, model: str = "gpt-4"):
+    """Count the number of tokens in a given text for a specified model."""
+    encoding = tiktoken.encoding_for_model(model)
+    return len(encoding.encode(text))
+
+
+async def process_audio_async(user_id, file_id, file_path):
+    wav_path = Path(file_path).with_suffix('.wav')
+    
+    try:
+        # Initial conversion and segmentation
+        if Path(file_path).exists():
+            subprocess.run([
+                "ffmpeg", "-i", file_path, 
+                "-ac", "1", "-ar", "16000", 
+                "-sample_fmt", "s16",
+                str(wav_path), 
+                "-y"
+            ], check=True, capture_output=True)
+        else:
+            await send_message_safe(user_id, "❌ Audio file missing.")
+            return
+        
+        segments = await split_audio(wav_path) if wav_path.stat().st_size > 1024 * 1024 else [wav_path]
+        if not segments:
+            await send_message_safe(user_id, "❌ No audio segments were created.")
+            return
+            
+        # Calculate initial ETA (assuming ~30 seconds per segment as baseline)
+        estimated_time = len(segments) * 30  
+        
+        # Initial processing status message
+        initial_msg = (
+            f"✅ Audio received\n"
+            f"📊 Segments to process: {len(segments)}\n"
+            f"⏱️ Estimated time: {estimated_time:.2f}s\n"
+            f"🔄 Processing..."
+        )
+        await send_message_safe(user_id, initial_msg)
+        
+        start_time = time.time()
+        
+        full_transcription = ""
+        full_translation = ""
+        transcription_tokens = 0
+        translation_tokens = 0
+        
+        for i, segment in enumerate(segments, 1):
+            try:
+                transcription = await process_audio_chunk(segment, model)
+                translation = await process_audio_chunk(segment, model, task="translate")
+                
+                if transcription.strip():
+                    full_transcription += transcription
+                    transcription_tokens += count_tokens(transcription)
+
+                if translation.strip():
+                    full_translation += translation
+                    translation_tokens += count_tokens(translation)
+                    
+            except Exception as e:
+                logging.error(f"Error processing segment {i}: {e}")
+                continue
+            finally:
+                Path(segment).unlink(missing_ok=True)
+        
+        # Calculate elapsed time
+        elapsed_time = time.time() - start_time
+        
+        # Send results
+        if full_transcription.strip():
+            await send_message_safe(user_id, "📄 Transcription:")
+            await send_message_safe(user_id, full_transcription.strip())
+        
+        if full_translation.strip():
+            await send_message_safe(user_id, "🌍 Translation:")
+            await send_message_safe(user_id, full_translation.strip())
+        
+        # Processing statistics
+        stats_msg = (
+            f"📊 Processing Statistics:\n"
+            f"🕒 Total Time: {elapsed_time:.2f}s\n"
+            f"📊 Segments: {len(segments)}\n"
+            f"📝 Transcription Tokens: {transcription_tokens}\n"
+            f"🌍 Translation Tokens: {translation_tokens}"
+        )
+        
+        await send_message_safe(user_id, stats_msg)
+        
+    except Exception as e:
+        logging.error(f"Error processing audio {file_id}: {e}")
+        await send_message_safe(user_id, f"❌ Error processing audio: {e}")
+    finally:
+        Path(file_path).unlink(missing_ok=True)
+        Path(wav_path).unlink(missing_ok=True)
+        processing_states.pop(file_id, None)
+        audio_queue.task_done()
+
+
+async def audio_worker():
+    while True:
+        user_id, file_id, file_path = await audio_queue.get()
+        await process_audio_async(user_id, file_id, file_path)
+
+@dp.message(Command("start"))
+async def start_handler(message: types.Message):
+    await message.answer(
+        "🌍 Español:\n"
+        "👋 ¡Bienvenido a InnerVoice!\n"
+        "🎙️ Envíame un mensaje de voz y te enviaré la transcripción y traducción automática.\n"
+        "✅ Simple, rápido y gratuito.\n\n"
+        "🇬🇧 English:\n"
+        "👋 Welcome to InnerVoice!\n"
+        "🎙️ Send me a voice message, and I'll transcribe and translate it.\n"
+        "✅ Simple, fast, and free.\n\n"
+        "🛠️ Built with OpenAI Whisper - Construido con OpenAI Whisper\n"
+        "🔒 Your data stays local - Tus datos permanecen locales\n"
+        "💻 Runs on any modern laptop - Funciona en cualquier portátil moderno\n\n"
+        "💡 Commands / Comandos:\n"
+        "/lang - Change language / Cambiar idioma\n"
+        "/help - Help / Ayuda\n"
+        "/about - About / Acerca de\n\n"
+        "📫 Contact / Contacto: @arkano21\n"
+        "⚡ Support / Apoya:\n"
+        "- Bitcoin: `bc1qwktevffc57rkk8lwyd6yqwxrvcd4vjxggcpsrn`\n"
+        "- Lightning: `buffswan6@primal.net`\n"
+        "- Nostr: `npub1p2x3t3njq44vsk24qjkauzurvfd59c224qyu2mpgu9jverk9tfrqnz0ql5`",
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("help"))
+async def help_handler(message: types.Message):
+    lang = message.from_user.language_code
+    if lang == "es":
+        await message.answer(
+            "ℹ️ *¿Cómo usar InnerVoice?*\n\n"
+            "1. Graba y envía un mensaje de voz.\n"
+            "2. Recibirás el texto transcrito y una traducción al inglés.\n"
+            "3. Úsalo para estudiar, guardar ideas, o comunicarte mejor.\n\n"
+            "📌 Solo funciona con mensajes de voz, no llamadas ni videos.",
+            parse_mode="Markdown"
+        )
+    else:
+        await message.answer(
+            "ℹ️ *How to use InnerVoice?*\n\n"
+            "1. Record and send a voice message.\n"
+            "2. You’ll get a transcription and a translation into spanish.\n"
+            "3. Use it for studying, capturing ideas, or better communication.\n\n"
+            "📌 Only works with voice messages, not calls or videos.",
+            parse_mode="Markdown"
+        )
+
+@dp.message(Command("about"))
+async def about_handler(message: types.Message):
+    lang = message.from_user.language_code
+    if lang == "es":
+        await message.answer(
+            "📚 *Acerca de InnerVoice*\n\n"
+            "🔒 Transcripción de Voz con Privacidad\n"
+            "Este bot se ejecuta completamente en tu propio servidor, asegurando que tus mensajes de voz nunca "
+            "salgan de tu control. Construido con el modelo Whisper de OpenAI, proporciona transcripciones precisas "
+            "mientras mantiene la soberanía de tus datos.\n\n"
+            "🛠️ Tecnologías Utilizadas:\n"
+            "- OpenAI Whisper para transcripción AI\n"
+            "- FFmpeg para procesamiento de audio\n"
+            "- Python y aiogram para confiabilidad\n"
+            "- Docker para fácil implementación\n\n"
+            "� ¿Por qué Autogestionar?\n"
+            "En el panorama actual de la IA, mantener el control de tus datos es crucial. "
+            "Este bot demuestra cómo aprovechar herramientas potentes de IA mientras mantienes tu información privada.\n\n"
+            "📫 Contacto: @arkano21",
+            parse_mode="Markdown"
+        )
+    else:
+        await message.answer(
+            "📚 *About InnerVoice*\n\n"
+            "🔒 Privacy-First Voice Transcription\n"
+            "This bot runs entirely on your own server, ensuring your voice messages never leave your control. "
+            "Built with OpenAI's Whisper model, it provides accurate transcriptions while maintaining data sovereignty.\n\n"
+            "🛠️ Technology Stack:\n"
+            "- OpenAI Whisper for AI transcription\n"
+            "- FFmpeg for audio processing\n"
+            "- Python & aiogram for reliability\n"
+            "- Docker for easy deployment\n\n"
+            "� Why Self-Host?\n"
+            "In today's AI landscape, maintaining control of your data is crucial. "
+            "This bot demonstrates how to leverage powerful AI tools while keeping your information private.\n\n"
+            "📫 Contact: @arkano21",
+            parse_mode="Markdown"
+        )
+@dp.message(Command("lang"))
+async def lang_handler(message: types.Message):
+    try:
+        current_lang_info = SUPPORTED_LANGUAGES[current_language]
+        await message.answer(
+            f"Select language / Seleccione idioma:\n"
+            f"Current/Actual: {current_lang_info['emoji']} {current_lang_info['local']}",
+            reply_markup=create_language_keyboard()
+        )
+    except Exception as e:
+        logging.error(f"Error in lang handler: {e}")
+        await message.answer("Error showing language options. Please try again.")
+
+@dp.callback_query(lambda c: c.data and c.data.startswith('lang_'))
+async def process_language_callback(callback_query: types.CallbackQuery):
+    lang_code = callback_query.data.split('_')[1]
+    try:
+        if lang_code in SUPPORTED_LANGUAGES:
+            global current_language
+            current_language = lang_code
+            lang_info = SUPPORTED_LANGUAGES[lang_code]
+            await callback_query.message.edit_text(
+                f"✅ Language set to: {lang_info['emoji']} {lang_info['local']} ({lang_info['name']})\n"
+                f"Send a voice message to try it out!"
+            )
+        await callback_query.answer()
+    except Exception as e:
+        logging.error(f"Error in language callback: {e}")
+        await callback_query.answer("Error setting language. Please try again.")
+
+@dp.message(Command("status"))
+async def status_handler(message: types.Message):
+    await message.answer(
+        f"Current language: {SUPPORTED_LANGUAGES[current_language]}\n"
+        f"Command to change: /lang [language_code]"
+    )
+
+@dp.message(Command("contribute"))
+async def contribute_handler(message: types.Message):
+    lang = message.from_user.language_code
+    if lang == "es":
+        await message.answer(
+            "💖 *Apoya el desarrollo de InnerVoice*\n\n"
+            "Si encuentras útil este bot y quieres apoyar su mantenimiento y mejora, puedes contribuir con una donación:\n\n"
+            "🟠 *Bitcoin (on-chain)*: `bc1qwktevffc57rkk8lwyd6yqwxrvcd4vjxggcpsrn`\n"
+            "⚡ *Lightning Address*: `buffswan6@primal.net`\n"
+            "⚡ *Nostr*: `npub1p2x3t3njq44vsk24qjkauzurvfd59c224qyu2mpgu9jverk9tfrqnz0ql5`\n\n"
+            "¡Gracias por tu apoyo! 🙌",
+            parse_mode="Markdown"
+        )
+    else:
+        await message.answer(
+            "💖 *Support InnerVoice Development*\n\n"
+            "If you find this bot useful and want to help keep it running and improving, consider a small donation:\n\n"
+            "🟠 *Bitcoin (on-chain)*: `bc1qwktevffc57rkk8lwyd6yqwxrvcd4vjxggcpsrn`\n"
+            "⚡ *Lightning Address*: `buffswan6@primal.net`\n"
+            "⚡ *Nostr*: `npub1p2x3t3njq44vsk24qjkauzurvfd59c224qyu2mpgu9jverk9tfrqnz0ql5`\n\n"
+            "Thanks for your support! 🙌",
+            parse_mode="Markdown"
+        )
+
+
+@dp.message(F.voice)
+async def handle_voice(message: types.Message):
+    user_id = message.from_user.id
+    voice = await bot.download(message.voice)
+    file_id = message.voice.file_id
+    file_path = os.path.join(AUDIO_DIR, f"{file_id}.ogg")
+
+    with open(file_path, "wb") as f:
+        f.write(voice.read())
+
+    await audio_queue.put((user_id, file_id, file_path))
+
+async def split_audio(wav_path: Path) -> List[Path]:
+    """Split audio into manageable chunks with overlap."""
+    segments = []
+    output_template = str(wav_path.with_name(f"{wav_path.stem}_part%d{wav_path.suffix}"))
+    
+    try:
+        subprocess.run([
+            "ffmpeg", "-i", str(wav_path),
+            "-f", "segment",
+            "-segment_time", str(CHUNK_SIZE_SECONDS),
+            "-c", "copy",
+            output_template
+        ], check=True, capture_output=True)
+        
+        # Collect all generated segments
+        index = 0
+        while True:
+            segment_path = Path(output_template % index)
+            if not segment_path.exists():
+                break
+            segments.append(segment_path)
+            index += 1
+            
+        return segments
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error splitting audio: {e.stderr.decode()}")
+        raise RuntimeError(f"Failed to split audio: {e}")
+
+async def main():
+    audio_worker_task = asyncio.create_task(audio_worker())
+    
+    while True:
+        try:
+            await dp.start_polling(bot)
+        except Exception as e:
+            logging.error(f"Polling error: {e}")
+            await asyncio.sleep(5)  # Wait before retry
+        finally:
+            if not audio_worker_task.done():
+                audio_worker_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await audio_worker_task
+
+if __name__ == "__main__":
+    os.nice(10)  # Set lower process priority
+    asyncio.run(main())

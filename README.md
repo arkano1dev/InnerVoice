@@ -28,8 +28,11 @@ The bot is designed for reproducibility and ease of deployment on various server
 
 - **Voice-to-Text Transcription:** Converts audio messages to text.
 - **Translation:** Provides a translation of the transcribed text.
-- **Resource-Aware Processing:** Monitors CPU usage and delays processing if necessary.
-- **Logging:** Detailed logs in `bot.log` aid in debugging and performance monitoring.
+- **Multi-language Support:** Supports Spanish, English, French, Dutch, Portuguese, and German.
+- **Privacy-First Design:** Runs locally on your machine, keeping your data private.
+- **Docker Support:** Easy deployment with containerization.
+- **Resource-Efficient:** Optimized for basic hardware without GPU requirement.
+- **Logging:** Detailed logs aid in debugging and performance monitoring.
 
 ---
 
@@ -50,10 +53,9 @@ Ensure the following packages are installed before running the bot:
 sudo apt update
 sudo apt install python3-venv
 sudo apt install ffmpeg
-sudo apt install util-linux
 ```
 
-> **Note:** `ffmpeg` is required to convert OGG voice messages to WAV format. `util-linux` provides `ionice` for resource-aware processing.
+> **Note:** `ffmpeg` is required to convert OGG voice messages to WAV format.
 
 ---
 
@@ -105,44 +107,45 @@ Replace `your_telegram_token_here` with your actual Telegram Bot API key.
 
 ## Running the Bot
 
-### 1. Activate the Virtual Environment
+You can run the bot either directly or using Docker.
 
-Each time you start the bot, activate the virtual environment:
+### Option 1: Direct Execution
 
+1. Activate the Virtual Environment:
 ```bash
 source venv/bin/activate  # Linux/macOS
 venv\Scripts\activate    # Windows
 ```
 
-### 2. Start the Bot
-
+2. Start the Bot:
 ```bash
 python3 bot.py
 ```
 
-### 3. Running in the Background (Linux)
+### Option 2: Using Docker (Recommended)
 
-To keep the bot running after closing the terminal:
-
+1. Build and Start:
 ```bash
-nohup python3 bot.py > bot.log 2>&1 &
+docker-compose up -d
 ```
 
-> **nohup** ensures the bot continues running in the background.
-
-To stop the bot:
-        
+2. View Logs:
 ```bash
-pkill -f bot.py
+docker-compose logs -f
 ```
 
-### 4. Checking Logs
-
-Monitor the bot logs using:
-
+3. Stop the Bot:
 ```bash
-tail -f bot.log
+docker-compose down
 ```
+
+### Docker Benefits
+- No need to install Python or dependencies locally
+- Automatic restart on failure
+- Easy deployment across different systems
+- Isolated environment
+- Resource management
+- Clean temporary file handling
 ---
 
 ## Usage
@@ -151,13 +154,28 @@ tail -f bot.log
    - Run `python3 bot.py` after setting up your environment.
 
 2. **Interacting via Telegram:**
-   - Send the `/start` command to receive a welcome message.
+   - Send the `/start` command to receive a welcome message in Spanish and English.
+   - Available commands:
+     - `/lang` - Change the language for transcription/translation
+     - `/help` - View usage instructions and hardware requirements
+     - `/about` - Learn about the bot's privacy features and technology
    - Send a voice message. The bot will:
      - Download and convert the audio.
      - Process the audio using the Whisper model.
-     - Return the transcription and translation.
+     - Return both transcription and translation.
+     - Provide processing statistics (time, segments, tokens).
 
-3. **Logging:**
+3. **Language Selection:**
+   - Use `/lang` to view and change the language.
+   - Supported languages:
+     - Spanish (default)
+     - English
+     - French
+     - Dutch
+     - Portuguese
+     - German
+
+4. **Logging:**
    - Refer to `bot.log` for detailed logs and troubleshooting information.
 
 ---
