@@ -49,12 +49,12 @@ audio_queue = asyncio.Queue()
 
 # Language configuration
 SUPPORTED_LANGUAGES = {
-    'es': {'name': 'Spanish', 'local': 'Español'},
-    'en': {'name': 'English', 'local': 'English'},
-    'fr': {'name': 'French', 'local': 'Français'},
-    'nl': {'name': 'Dutch', 'local': 'Nederlands'},
-    'pt': {'name': 'Portuguese', 'local': 'Português'},
-    'de': {'name': 'German', 'local': 'Deutsch'}
+    'es': {'name': 'Spanish', 'local': 'Español', 'flag': '🇪🇸'},
+    'en': {'name': 'English', 'local': 'English', 'flag': '🇬🇧'},
+    'fr': {'name': 'French', 'local': 'Français', 'flag': '🇫🇷'},
+    'nl': {'name': 'Dutch', 'local': 'Nederlands', 'flag': '🇳🇱'},
+    'pt': {'name': 'Portuguese', 'local': 'Português', 'flag': '🇵🇹'},
+    'de': {'name': 'German', 'local': 'Deutsch', 'flag': '🇩🇪'}
 }
 
 # Default language
@@ -65,11 +65,10 @@ CHUNK_SIZE_SECONDS = 30
 processing_states: Dict[str, Dict] = {}
 
 def create_language_keyboard() -> InlineKeyboardMarkup:
-    """Create inline keyboard for language selection."""
+    """Create inline keyboard for language selection with flag emojis."""
     keyboard = []
     for code, info in SUPPORTED_LANGUAGES.items():
-        button_text = f"{info['local']} ({info['name']})"
-        keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f"lang_{code}")])
+        keyboard.append([InlineKeyboardButton(text=info['flag'], callback_data=f"lang_{code}")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 @dp.message(Command("start"))
@@ -168,13 +167,13 @@ async def lang_handler(message: types.Message):
     try:
         current_lang_info = SUPPORTED_LANGUAGES[current_language]
         await message.answer(
-            f"Current/Actual: {current_lang_info['local']}\n"
-            "Select language / Seleccione idioma:",
+            f"🌐 Current: {current_lang_info['flag']}\n"
+            "👇 Select your language:",
             reply_markup=create_language_keyboard()
         )
     except Exception as e:
         logging.error(f"Error in lang handler: {e}")
-        await message.answer("Error showing language options. Please try again.")
+        await message.answer("❌ Error showing language options. Please try again.")
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('lang_'))
 async def process_language_callback(callback_query: types.CallbackQuery):
@@ -185,13 +184,13 @@ async def process_language_callback(callback_query: types.CallbackQuery):
             current_language = lang_code
             lang_info = SUPPORTED_LANGUAGES[lang_code]
             await callback_query.message.edit_text(
-                f"Language set to: {lang_info['local']} ({lang_info['name']})\n"
-                f"Send a voice message to try it out!"
+                f"🌐 Language set: {lang_info['flag']}\n"
+                f"🎙️ Send a voice message to try it out!"
             )
         await callback_query.answer()
     except Exception as e:
         logging.error(f"Error in language callback: {e}")
-        await callback_query.answer("Error setting language. Please try again.")
+        await callback_query.answer("❌ Error setting language. Please try again.")
 
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
@@ -250,6 +249,14 @@ async def send_message_safe(user_id: int, text: str) -> bool:
                 await asyncio.sleep(2 ** attempt)
     return False
 
+def count_tokens(text: str) -> int:
+    """Count tokens in text using tiktoken."""
+    try:
+        encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+        return len(encoding.encode(text))
+    except Exception:
+        return len(text.split())
+
 async def process_audio_async(user_id, file_id, file_path):
     wav_path = Path(file_path).with_suffix('.wav')
     
@@ -264,22 +271,23 @@ async def process_audio_async(user_id, file_id, file_path):
                 "-y"
             ], check=True, capture_output=True)
         else:
-            await send_message_safe(user_id, "Audio file missing.")
+            await send_message_safe(user_id, "❌ Audio file missing.")
             return
         
         segments = await split_audio(wav_path) if wav_path.stat().st_size > 1024 * 1024 else [wav_path]
         if not segments:
-            await send_message_safe(user_id, "No audio segments were created.")
+            await send_message_safe(user_id, "❌ No audio segments were created.")
             return
             
         # Calculate initial ETA
         estimated_time = len(segments) * 30  
         
         await send_message_safe(user_id, 
-            f"Audio received\n"
-            f"Segments to process: {len(segments)}\n"
-            f"Estimated time: {estimated_time:.2f}s\n"
-            f"Processing..."
+            f"🎵 Audio received!\n\n"
+            f"📊 Status:\n"
+            f"└─ 🔢 Segments: {len(segments)}\n"
+            f"└─ ⏱️ Estimated time: {estimated_time:.0f}s\n\n"
+            f"🔄 Processing your audio..."
         )
         
         start_time = time.time()
@@ -309,20 +317,21 @@ async def process_audio_async(user_id, file_id, file_path):
         
         elapsed_time = time.time() - start_time
         
+        # Send only the content without formatting
         if full_transcription.strip():
-            await send_message_safe(user_id, "Transcription:")
             await send_message_safe(user_id, full_transcription.strip())
         
-        if full_translation.strip():
-            await send_message_safe(user_id, "Translation:")
+        if full_translation.strip() and current_language != 'en':
             await send_message_safe(user_id, full_translation.strip())
         
+        # Send processing statistics with emojis
         await send_message_safe(user_id,
-            f"Processing Statistics:\n"
-            f"Total Time: {elapsed_time:.2f}s\n"
-            f"Segments: {len(segments)}\n"
-            f"Transcription Tokens: {transcription_tokens}\n"
-            f"Translation Tokens: {translation_tokens}"
+            f"✨ Processing Complete!\n\n"
+            f"📊 Statistics:\n"
+            f"└─ ⏱️ Time: {elapsed_time:.1f}s\n"
+            f"└─ 🔢 Segments: {len(segments)}\n"
+            f"└─ 📝 Original: {transcription_tokens} tokens\n"
+            f"└─ 🔄 Translation: {translation_tokens} tokens"
         )
         
     except Exception as e:
