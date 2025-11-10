@@ -13,7 +13,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G  # Adjust based on your needs, especially for the Whisper model
+          memory: 10G  # Adjust based on your needs, especially for the Whisper model
 
 volumes:
   audio_temp:
