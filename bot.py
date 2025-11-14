@@ -264,90 +264,174 @@ async def help_handler(message: types.Message):
     prefs = user_preferences[user_id]
     lang_info = SUPPORTED_LANGUAGES[prefs['language']]
     mode_info = PROCESSING_MODES[prefs['mode']]
+    ui_lang = prefs.get('ui_language', 'en')
     
-    await message.answer(
-        "📖 <b>How to Use InnerVoice</b>\n\n"
-        "1️⃣ <b>Send a voice message</b>\n"
-        "   Record any length - from seconds to 30+ minutes\n\n"
-        "2️⃣ <b>Processing</b>\n"
-        "   Watch the progress bar as your audio is transcribed\n\n"
-        "3️⃣ <b>Get results</b>\n"
-        "   • Original transcription (clean text)\n"
-        "   • English translation (clean text)\n"
-        "   • Both ready to copy & paste!\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>⚙️ Modes:</b>\n\n"
-        "🚀 <b>Fast Mode</b>\n"
-        "   Get only English translation (faster)\n\n"
-        "📝 <b>Full Mode</b>\n"
-        "   Get both original + English\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>🌐 Language Selection:</b>\n\n"
-        "The language setting optimizes Whisper AI for your spoken language.\n"
-        "This improves accuracy but doesn't limit auto-detection.\n\n"
-        f"Current: {lang_info['flag']} {lang_info['name']}\n"
-        f"Mode: {mode_info['icon']} {mode_info['name']}\n\n"
-        "Change via /settings\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>💡 Tips:</b>\n\n"
-        "• Speak clearly for best results\n"
-        "• Long audios (15-30+ min) are supported\n"
-        "• All messages use code blocks for easy copying\n"
-        "• Enable timestamps in settings for time markers\n"
-        "• Your audio is never stored permanently",
-        parse_mode="HTML"
-    )
+    if ui_lang == 'es':
+        await message.answer(
+            "📖 <b>Cómo Usar InnerVoice</b>\n\n"
+            "1️⃣ <b>Envía un mensaje de voz</b>\n"
+            "   Graba cualquier duración - desde segundos hasta 30+ minutos\n\n"
+            "2️⃣ <b>Procesamiento</b>\n"
+            "   Observa la barra de progreso mientras se transcribe tu audio\n\n"
+            "3️⃣ <b>Obtén resultados</b>\n"
+            "   • Transcripción original (texto limpio)\n"
+            "   • Traducción al inglés (texto limpio)\n"
+            "   • ¡Ambos listos para copiar y pegar!\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>⚙️ Modos:</b>\n\n"
+            "🚀 <b>Modo Rápido</b>\n"
+            "   Solo traducción al inglés (más rápido)\n\n"
+            "📝 <b>Modo Completo</b>\n"
+            "   Original + traducción al inglés\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>🌐 Selección de Idioma:</b>\n\n"
+            "El idioma optimiza Whisper AI para tu idioma hablado.\n"
+            "Esto mejora la precisión pero no limita la auto-detección.\n\n"
+            f"Actual: {lang_info['flag']} {lang_info['name']}\n"
+            f"Modo: {mode_info['icon']} {mode_info['name']}\n\n"
+            "Cambia en /settings\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>💡 Consejos:</b>\n\n"
+            "• Habla claramente para mejores resultados\n"
+            "• Audios largos (15-30+ min) son soportados\n"
+            "• Todos los mensajes son texto plano para copiar fácil\n"
+            "• Activa marcas de tiempo en ajustes\n"
+            "• Tu audio nunca se almacena permanentemente",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            "📖 <b>How to Use InnerVoice</b>\n\n"
+            "1️⃣ <b>Send a voice message</b>\n"
+            "   Record any length - from seconds to 30+ minutes\n\n"
+            "2️⃣ <b>Processing</b>\n"
+            "   Watch the progress bar as your audio is transcribed\n\n"
+            "3️⃣ <b>Get results</b>\n"
+            "   • Original transcription (clean text)\n"
+            "   • English translation (clean text)\n"
+            "   • Both ready to copy & paste!\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>⚙️ Modes:</b>\n\n"
+            "🚀 <b>Fast Mode</b>\n"
+            "   Get only English translation (faster)\n\n"
+            "📝 <b>Full Mode</b>\n"
+            "   Get both original + English\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>🌐 Language Selection:</b>\n\n"
+            "The language setting optimizes Whisper AI for your spoken language.\n"
+            "This improves accuracy but doesn't limit auto-detection.\n\n"
+            f"Current: {lang_info['flag']} {lang_info['name']}\n"
+            f"Mode: {mode_info['icon']} {mode_info['name']}\n\n"
+            "Change via /settings\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>💡 Tips:</b>\n\n"
+            "• Speak clearly for best results\n"
+            "• Long audios (15-30+ min) are supported\n"
+            "• All messages are plain text for easy copying\n"
+            "• Enable timestamps in settings for time markers\n"
+            "• Your audio is never stored permanently",
+            parse_mode="HTML"
+        )
 
 @dp.message(Command("about"))
 async def about_handler(message: types.Message):
-    await message.answer(
-        "🔐 <b>Privacy-First Voice Transcription</b>\n\n"
-        "InnerVoice runs entirely on your own infrastructure, keeping your conversations "
-        "completely private. No data is sent to external servers - everything happens locally.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>🛠️ Technology Stack:</b>\n\n"
-        "🤖 <b>OpenAI Whisper (Medium)</b>\n"
-        "   State-of-the-art speech recognition\n"
-        "   Runs 100% locally - no API calls\n\n"
-        "🎵 <b>FFmpeg</b>\n"
-        "   Professional audio processing\n"
-        "   Handles any audio format\n\n"
-        "🐍 <b>Python & aiogram</b>\n"
-        "   Async processing for speed\n"
-        "   Reliable Telegram integration\n\n"
-        "🐳 <b>Docker</b>\n"
-        "   Easy deployment & updates\n"
-        "   Consistent environment\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>💪 Capabilities:</b>\n\n"
-        "• Transcribe 30+ minute recordings\n"
-        "• Support for 12docker + languages\n"
-        "• Automatic language detection\n"
-        "• Translation to English\n"
-        "• Optional timestamps\n"
-        "• Segment-based processing\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>⚡ Requirements:</b>\n\n"
-        "• Modern laptop or PC (4+ GB RAM)\n"
-        "• No GPU needed (CPU-only)\n"
-        "• ~1.5GB disk space for Whisper model\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>📝 License & Source:</b>\n\n"
-        "Open source - Self-hosted solution\n"
-        "Your data, your control\n\n"
-        "Made with ❤️ by @arkano21",
-        parse_mode="HTML"
-    )
+    user_id = message.from_user.id
+    prefs = user_preferences[user_id]
+    ui_lang = prefs.get('ui_language', 'en')
+    
+    if ui_lang == 'es':
+        await message.answer(
+            "🔐 <b>Transcripción de Voz con Privacidad</b>\n\n"
+            "InnerVoice se ejecuta completamente en tu propia infraestructura, manteniendo tus "
+            "conversaciones completamente privadas. No se envían datos a servidores externos - todo sucede localmente.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>🛠️ Stack Tecnológico:</b>\n\n"
+            "🤖 <b>OpenAI Whisper (Medium)</b>\n"
+            "   Reconocimiento de voz de última generación\n"
+            "   Se ejecuta 100% localmente - sin llamadas API\n\n"
+            "🎵 <b>FFmpeg</b>\n"
+            "   Procesamiento profesional de audio\n"
+            "   Maneja cualquier formato de audio\n\n"
+            "🐍 <b>Python & aiogram</b>\n"
+            "   Procesamiento asíncrono para velocidad\n"
+            "   Integración confiable con Telegram\n\n"
+            "🐳 <b>Docker</b>\n"
+            "   Despliegue y actualizaciones fáciles\n"
+            "   Entorno consistente\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>💪 Capacidades:</b>\n\n"
+            "• Transcribe grabaciones de 30+ minutos\n"
+            "• Soporte para 12+ idiomas\n"
+            "• Detección automática de idioma\n"
+            "• Traducción al inglés\n"
+            "• Marcas de tiempo opcionales\n"
+            "• Procesamiento basado en segmentos\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>⚡ Requisitos:</b>\n\n"
+            "• Laptop o PC moderna (4+ GB RAM)\n"
+            "• No se necesita GPU (solo CPU)\n"
+            "• ~1.5GB de espacio en disco para el modelo Whisper\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>📝 Licencia y Código:</b>\n\n"
+            "Código abierto - Solución auto-hospedada\n"
+            "Tus datos, tu control\n\n"
+            "Hecho con ❤️ por @arkano21",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            "🔐 <b>Privacy-First Voice Transcription</b>\n\n"
+            "InnerVoice runs entirely on your own infrastructure, keeping your conversations "
+            "completely private. No data is sent to external servers - everything happens locally.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>🛠️ Technology Stack:</b>\n\n"
+            "🤖 <b>OpenAI Whisper (Medium)</b>\n"
+            "   State-of-the-art speech recognition\n"
+            "   Runs 100% locally - no API calls\n\n"
+            "🎵 <b>FFmpeg</b>\n"
+            "   Professional audio processing\n"
+            "   Handles any audio format\n\n"
+            "🐍 <b>Python & aiogram</b>\n"
+            "   Async processing for speed\n"
+            "   Reliable Telegram integration\n\n"
+            "🐳 <b>Docker</b>\n"
+            "   Easy deployment & updates\n"
+            "   Consistent environment\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>💪 Capabilities:</b>\n\n"
+            "• Transcribe 30+ minute recordings\n"
+            "• Support for 12+ languages\n"
+            "• Automatic language detection\n"
+            "• Translation to English\n"
+            "• Optional timestamps\n"
+            "• Segment-based processing\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>⚡ Requirements:</b>\n\n"
+            "• Modern laptop or PC (4+ GB RAM)\n"
+            "• No GPU needed (CPU-only)\n"
+            "• ~1.5GB disk space for Whisper model\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>📝 License & Source:</b>\n\n"
+            "Open source - Self-hosted solution\n"
+            "Your data, your control\n\n"
+            "Made with ❤️ by @arkano21",
+            parse_mode="HTML"
+        )
 
 @dp.message(Command("settings"))
 async def settings_handler(message: types.Message):
     """Show comprehensive settings."""
     user_id = message.from_user.id
     prefs = user_preferences[user_id]
+    ui_lang = prefs.get('ui_language', 'en')
+    
+    if ui_lang == 'es':
+        msg = "⚙️ <b>Tus Configuraciones</b>\n\nConfigura tu experiencia InnerVoice:"
+    else:
+        msg = "⚙️ <b>Your Settings</b>\n\nConfigure your InnerVoice experience:"
     
     await message.answer(
-        "⚙️ <b>Your Settings</b>\n\n"
-        "Configure your InnerVoice experience:",
+        msg,
         reply_markup=create_settings_keyboard(user_id),
         parse_mode="HTML"
     )
@@ -357,19 +441,30 @@ async def lang_handler(message: types.Message):
     """Quick language change."""
     user_id = message.from_user.id
     prefs = user_preferences[user_id]
+    ui_lang = prefs.get('ui_language', 'en')
     try:
         current_lang_info = SUPPORTED_LANGUAGES[prefs['language']]
-        await message.answer(
-            f"🌐 <b>Language Optimization</b>\n\n"
-            f"Current: {current_lang_info['flag']} {current_lang_info['name']}\n\n"
-            f"<i>This optimizes Whisper AI for your spoken language.</i>\n\n"
-            "👇 Select your language:",
-            reply_markup=create_language_keyboard(),
-            parse_mode="HTML"
-        )
+        
+        if ui_lang == 'es':
+            msg = (
+                f"🌐 <b>Optimización de Idioma</b>\n\n"
+                f"Actual: {current_lang_info['flag']} {current_lang_info['name']}\n\n"
+                f"<i>Esto optimiza Whisper AI para tu idioma hablado.</i>\n\n"
+                "👇 Selecciona tu idioma:"
+            )
+        else:
+            msg = (
+                f"🌐 <b>Language Optimization</b>\n\n"
+                f"Current: {current_lang_info['flag']} {current_lang_info['name']}\n\n"
+                f"<i>This optimizes Whisper AI for your spoken language.</i>\n\n"
+                "👇 Select your language:"
+            )
+        
+        await message.answer(msg, reply_markup=create_language_keyboard(), parse_mode="HTML")
     except Exception as e:
         logging.error(f"Error in lang handler: {e}")
-        await message.answer("❌ Error showing language options. Please try again.")
+        error_msg = "❌ Error mostrando opciones de idioma." if ui_lang == 'es' else "❌ Error showing language options."
+        await message.answer(error_msg)
 
 @dp.message(Command("mode"))
 async def mode_handler(message: types.Message):
@@ -377,15 +472,24 @@ async def mode_handler(message: types.Message):
     user_id = message.from_user.id
     prefs = user_preferences[user_id]
     mode_info = PROCESSING_MODES[prefs['mode']]
+    ui_lang = prefs.get('ui_language', 'en')
     
-    await message.answer(
-        f"⚡ <b>Processing Mode</b>\n\n"
-        f"Current: {mode_info['icon']} {mode_info['name']}\n"
-        f"<i>{mode_info['description']}</i>\n\n"
-        "👇 Select mode:",
-        reply_markup=create_mode_keyboard(),
-        parse_mode="HTML"
-    )
+    if ui_lang == 'es':
+        msg = (
+            f"⚡ <b>Modo de Procesamiento</b>\n\n"
+            f"Actual: {mode_info['icon']} {mode_info['name']}\n"
+            f"<i>{mode_info['description']}</i>\n\n"
+            "👇 Selecciona modo:"
+        )
+    else:
+        msg = (
+            f"⚡ <b>Processing Mode</b>\n\n"
+            f"Current: {mode_info['icon']} {mode_info['name']}\n"
+            f"<i>{mode_info['description']}</i>\n\n"
+            "👇 Select mode:"
+        )
+    
+    await message.answer(msg, reply_markup=create_mode_keyboard(), parse_mode="HTML")
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('ui_lang_'))
 async def process_ui_language_callback(callback_query: types.CallbackQuery):
@@ -756,6 +860,9 @@ async def process_audio_async(user_id, file_id, file_path):
         segments_text = get_text(user_id, 'segments')
         processing_text = get_text(user_id, 'processing')
         
+        # Calculate estimated time (rough estimate: 1:1 ratio)
+        estimated_time = int(duration) if duration > 0 else len(segments) * 30
+        
         # Send initial status with progress
         status_msg = await send_message_safe(
             user_id,
@@ -763,7 +870,8 @@ async def process_audio_async(user_id, file_id, file_path):
             f"{duration_text}: {int(duration)}s\n"
             f"{language_text}: {lang_info['flag']} {lang_info['name']}\n"
             f"{mode_text}: {mode_info['icon']} {mode_info['name']}\n"
-            f"{segments_text}: {len(segments)}\n\n"
+            f"{segments_text}: {len(segments)}\n"
+            f"⏱️ Estimado: ~{estimated_time}s\n\n"
             f"{processing_text}",
             parse_mode="HTML"
         )
@@ -829,15 +937,27 @@ async def process_audio_async(user_id, file_id, file_path):
         
         elapsed_time = time.time() - start_time
         
-        # Final progress update
+        # Final status update - keep the message, show estimated vs actual
         if progress_msg_id:
-            await update_progress(user_id, progress_msg_id, len(segments), len(segments), elapsed_time)
-            await asyncio.sleep(0.5)
-            # Delete progress message
             try:
-                await bot.delete_message(user_id, progress_msg_id)
-            except:
-                pass
+                final_msg = (
+                    f"{audio_received}\n\n"
+                    f"{duration_text}: {int(duration)}s\n"
+                    f"{language_text}: {lang_info['flag']} {lang_info['name']}\n"
+                    f"{mode_text}: {mode_info['icon']} {mode_info['name']}\n"
+                    f"{segments_text}: {len(segments)}\n"
+                    f"⏱️ Estimado: ~{estimated_time}s\n"
+                    f"✅ Real: {elapsed_time:.1f}s\n\n"
+                    f"✨ ¡Completado!" if prefs.get('ui_language') == 'es' else f"✨ Complete!"
+                )
+                await bot.edit_message_text(
+                    final_msg,
+                    user_id,
+                    progress_msg_id,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logging.error(f"Error updating final status: {e}")
         
         # Format timestamps if enabled
         def format_with_timestamps(text, segments):

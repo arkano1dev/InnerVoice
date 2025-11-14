@@ -546,12 +546,14 @@ services:
 
 ### Docker (Recommended)
 
+**Default: CPU-Only** (Faster build, no GPU needed)
+
 #### First Time Setup
 ```bash
 # Navigate to project
 cd /home/as/InnerVoice
 
-# Build and start
+# Build and start (CPU-only)
 docker compose up -d --build
 ```
 
@@ -567,6 +569,75 @@ docker compose restart bot
 docker compose down
 docker compose up -d --build
 ```
+
+### CPU vs GPU Setup
+
+#### CPU-Only (Default) ✅
+**Default configuration** - No changes needed!
+
+**Advantages**:
+- ✅ Faster Docker build (~5-10 min vs 30+ min)
+- ✅ Smaller image size (~3GB vs ~8GB)
+- ✅ Works on any machine
+- ✅ No CUDA drivers needed
+- ✅ Good performance for most use cases
+
+**Performance**:
+- ~1:1 ratio (30s audio = 30s processing)
+- Perfectly acceptable for personal use
+- Handles 30+ minute audio fine
+
+#### GPU-Enabled (Optional) 🚀
+Only needed if you have NVIDIA GPU and want maximum speed.
+
+**To Enable GPU**:
+
+1. **Edit Dockerfile**:
+```dockerfile
+# Comment out this line:
+# FROM python:3.10-slim
+
+# Uncomment this line:
+FROM pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
+
+# Comment out normal pip install
+# RUN pip install --no-cache-dir -r requirements.txt
+
+# Uncomment GPU install:
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu117
+RUN pip install --no-cache-dir openai-whisper aiogram python-dotenv tiktoken
+```
+
+2. **Update docker-compose.yml**:
+```yaml
+services:
+  bot:
+    build: .
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+```
+
+3. **Rebuild**:
+```bash
+docker compose down
+docker compose up -d --build
+```
+
+**GPU Requirements**:
+- NVIDIA GPU with CUDA support
+- NVIDIA Docker runtime installed
+- ~8GB+ VRAM recommended
+
+**Performance**:
+- ~3-5x faster than CPU
+- Useful for very frequent usage or very long audio
+
+**Recommendation**: **Stick with CPU** unless you're processing many hours of audio daily.
 
 #### View Logs
 ```bash
