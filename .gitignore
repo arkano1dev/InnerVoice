@@ -2,3 +2,5 @@
 audios/
 bot.log
 venv/
+__pycache__/
+*.pyc

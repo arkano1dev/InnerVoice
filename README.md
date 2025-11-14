@@ -1,6 +1,29 @@
 # InnerVoice
 
+**Version 2.1.0** - Privacy-First Voice Transcription Bot
+
 InnerVoice is a Telegram bot that transcribes and translates voice messages using OpenAI's Whisper model. Built with [aiogram](https://docs.aiogram.dev) and other Python libraries, the bot processes incoming voice messages, converts them to WAV format via `ffmpeg`, and then uses Whisper to generate both a transcription and a translation.
+
+## 📚 Documentation
+
+- **[DOCUMENTATION.md](DOCUMENTATION.md)** - Complete user & technical guide
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history and changes
+
+## Quick Start
+
+```bash
+# Clone and setup
+cd /home/as/InnerVoice
+
+# Configure your bot token in .env
+echo "BOT_TOKEN=your_token_here" > .env
+
+# Start with Docker
+docker compose up -d --build
+
+# Test it
+# Send /start to your bot in Telegram
+```
 
 ## Table of Contents
 
