@@ -11,18 +11,47 @@ logger = logging.getLogger(__name__)
 
 model_size = os.getenv("WHISPER_MODEL", "medium")
 VRAM_THRESHOLD_FREE_MB = int(os.getenv("VRAM_THRESHOLD_FREE_MB", "2048"))
+MODEL_PRELOAD = os.getenv("MODEL_PRELOAD", "false").lower() in ("1", "true", "yes")
+USE_FP16 = os.getenv("WHISPER_FP16", "true").lower() in ("1", "true", "yes")  # fp16 reduces VRAM for medium
 
 # Lazy-load model on first request so the server can bind to port 9000 before any GPU load (avoids startup segfault on some ROCm setups)
 _model = None
+_model_load_error = None
+
+
+def _probe_gpu():
+    """Minimal GPU probe - call before model load to diagnose ROCm/HIP issues."""
+    try:
+        import torch
+        available = torch.cuda.is_available()
+        device_count = torch.cuda.device_count() if available else 0
+        device_name = torch.cuda.get_device_name(0) if device_count else None
+        return {"available": available, "count": device_count, "name": device_name}
+    except Exception as e:
+        logger.exception("GPU probe failed")
+        return {"available": False, "error": str(e)}
 
 
 def get_model():
-    global _model
-    if _model is None:
-        import whisper
-        logger.info("Loading Whisper model %s (first request)...", model_size)
-        _model = whisper.load_model(model_size)
+    global _model, _model_load_error
+    if _model is not None:
+        return _model
+    if _model_load_error is not None:
+        raise RuntimeError(_model_load_error) from _model_load_error
+
+    import whisper
+    logger.info("Loading Whisper model %s (first request)...", model_size)
+    try:
+        gpu = _probe_gpu()
+        if not gpu.get("available"):
+            err = gpu.get("error", "GPU not available")
+            raise RuntimeError(f"Cannot load model: {err}. Check ROCm/iGPU setup.")
+        _model = whisper.load_model(model_size, device="cuda")
         logger.info("Loaded Whisper model: %s", model_size)
+    except Exception as e:
+        _model_load_error = e
+        logger.exception("Failed to load Whisper model: %s", e)
+        raise
     return _model
 
 
@@ -61,7 +90,7 @@ def get_vram_stats():
 
 
 def check_vram_available():
-    """Return True if enough VRAM is free for Whisper (medium ~2-3 GB)."""
+    """Return True if enough VRAM is free (threshold from VRAM_THRESHOLD_FREE_MB)."""
     used_mb, total_mb = get_vram_stats()
     if used_mb is None or total_mb is None:
         return True  # Unknown, allow attempt
@@ -99,7 +128,7 @@ def transcribe():
             result = get_model().transcribe(
                 tmp.name,
                 task=task,
-                fp16=False,
+                fp16=USE_FP16,
                 language=language if language else None,
                 verbose=False,
             )
@@ -131,5 +160,26 @@ def health():
     return jsonify(resp)
 
 
+@app.route("/gpu-check", methods=["GET"])
+def gpu_check():
+    """Diagnostic: minimal GPU probe without loading the full model. Use to verify ROCm/HIP before first transcribe."""
+    probe = _probe_gpu()
+    return jsonify({"gpu": probe, "model_loaded": _model is not None})
+
+
+def _preload_model():
+    """Optionally load model at startup (MODEL_PRELOAD=true) to surface load errors in logs before serving."""
+    if not MODEL_PRELOAD:
+        return
+    logger.info("MODEL_PRELOAD=true: probing GPU and loading model at startup...")
+    probe = _probe_gpu()
+    logger.info("GPU probe: %s", probe)
+    if not probe.get("available"):
+        logger.error("GPU not available. Set MODEL_PRELOAD=false to defer and rely on /gpu-check + first request.")
+        return
+    get_model()
+
+
 if __name__ == "__main__":
+    _preload_model()
     app.run(host="0.0.0.0", port=9000)

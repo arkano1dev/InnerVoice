@@ -18,21 +18,22 @@ services:
     volumes:
       - whisper_cache:/root/.cache
     environment:
-      - WHISPER_MODEL=tiny
-      - VRAM_THRESHOLD_FREE_MB=1024
+      - WHISPER_MODEL=medium
+      - WHISPER_FP16=true
+      - VRAM_THRESHOLD_FREE_MB=1536
       - ROCR_VISIBLE_DEVICES=0
       - HSA_OVERRIDE_GFX_VERSION=11.0.0
     deploy:
       resources:
         limits:
-          memory: 8G
+          memory: 5G
           cpus: "4"
     security_opt:
       - seccomp:unconfined
     cap_add:
       - SYS_PTRACE
     ipc: host
-    shm_size: "8g"
+    shm_size: "2g"
     devices:
       - /dev/kfd
       - /dev/dri
