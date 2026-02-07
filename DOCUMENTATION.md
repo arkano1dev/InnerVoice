@@ -1,7 +1,7 @@
 # InnerVoice Bot - Complete Documentation
 
-**Version**: 2.1.0  
-**Last Updated**: November 14, 2025  
+**Version**: 3.0.0  
+**Last Updated**: February 2025  
 **Status**: Production Ready ✅
 
 ---
@@ -9,8 +9,9 @@
 ## 📋 Table of Contents
 
 1. [Quick Start](#quick-start)
-2. [What's New in v2.1](#whats-new-in-v21)
-3. [Complete Feature List](#complete-feature-list)
+2. [Two-Docker Deployment (Whisper + Bot)](#two-docker-deployment)
+3. [What's New in v3](#whats-new-in-v3)
+4. [Complete Feature List](#complete-feature-list)
 4. [User Guide](#user-guide)
 5. [Commands Reference](#commands-reference)
 6. [Technical Details](#technical-details)
@@ -23,17 +24,16 @@
 
 ### First Time Setup
 
-1. **Start the bot**:
+1. **Configure** `.env` with your `BOT_TOKEN`
+2. **Start both services**:
 ```bash
-cd /home/as/InnerVoice
-docker compose up -d --build
+cd /path/to/InnerVoice
+make up
+# or: ./deploy.sh up
+# or: docker compose up -d --build
 ```
-
-2. **Open Telegram** and send `/start` to your bot
-
-3. **Select your language**: 🇪🇸 Español or 🇬🇧 English
-
-4. **Send a voice message** - that's it!
+3. **Open Telegram** and send `/start` to your bot
+4. **Send a voice message** - first audio works immediately (default Spanish)
 
 ### What You'll Get
 
@@ -42,6 +42,110 @@ docker compose up -d --build
 - 🎯 **Plain text** format - click to copy
 - ⚡ **Real-time progress** updates
 - 🔒 **100% private** - all processing local
+
+---
+
+## Two-Docker Deployment
+
+InnerVoice runs as **two separate containers** on the `TelegramNet` network:
+
+| Service | Role | Limits | Hardware |
+|---------|------|--------|----------|
+| **whisper** | Whisper API (Flask, ROCm) | 6G RAM, 4 CPUs | eGPU / ROCm |
+| **bot** | Telegram bot (aiogram) | 512M RAM | CPU only |
+
+### Architecture
+
+- **Whisper container**: Loads the medium model, exposes `/transcribe` and `/health` on port 9000. Runs on ROCm/eGPU.
+- **Bot container**: Receives voice from Telegram, converts OGG→WAV with ffmpeg, sends WAV to Whisper API via HTTP. Lightweight, no GPU.
+- **Network**: Both join `TelegramNet`; bot reaches Whisper at `http://whisper:9000`.
+
+### Deploy Commands
+
+```bash
+# Start both
+make up
+./deploy.sh up
+
+# Start only bot (Whisper must already be running)
+make up-bot
+./deploy.sh up-bot
+
+# Start only Whisper (e.g. for other apps)
+make up-whisper
+./deploy.sh up-whisper
+
+# Stop all
+make down
+./deploy.sh down
+
+# Logs
+make logs
+make logs-bot
+make logs-whisper
+```
+
+### ROCm / eGPU Setup
+
+Whisper uses ROCm 6.0 PyTorch. Ensure your host has:
+
+- AMD GPU with ROCm support
+- `/dev/kfd` and `/dev/dri` available
+- User in `video` group
+
+If you run **Ollama** on the same GPU, Whisper is **lower priority**:
+
+- Whisper checks VRAM before processing; if free VRAM &lt; 2 GB, returns `503 gpu_busy`
+- Bot shows “Whisper is busy” and a **Retry** button
+- Ollama takes precedence; when Ollama frees VRAM, use Retry
+
+To match your Ollama device (e.g. eGPU on device 1), add to `docker-compose.yml`:
+
+```yaml
+environment:
+  - HSA_OVERRIDE_GFX_VERSION=11.0.0
+  - ROCR_VISIBLE_DEVICES=0   # or 1 for eGPU
+```
+
+### Resource Limits
+
+- **Whisper**: 6G memory, 4 CPUs (tune in `docker-compose.yml` if needed)
+- **Bot**: 512M memory, 0.5 CPU
+- Adjust `VRAM_THRESHOLD_FREE_MB` (default 2048) to change busy detection
+
+### Reusing Whisper
+
+The Whisper container can be used by other apps: it exposes `http://whisper:9000` (or `localhost:9000` if port is published) with:
+
+- `POST /transcribe` – multipart form: `audio` (WAV), optional `language`, `task` (transcribe/translate), `return_segments`
+- `GET /health` – status + `vram_used_mb`, `vram_total_mb`
+
+---
+
+## What's New in v3
+
+### Two-Docker Architecture
+- **Whisper** and **Bot** run in separate containers on `TelegramNet`
+- Whisper uses ROCm/eGPU; Bot is lightweight (CPU only)
+- Deploy separately: `make up-bot`, `make up-whisper`
+- Whisper API reusable for other apps
+
+### Default Spanish & First-Audio Flow
+- Default UI and audio language: **Spanish**
+- First voice message works immediately (no language selection required)
+- Change UI language in `/settings`
+
+### Retry When Busy
+- If GPU/VRAM is loaded (e.g. Ollama), Whisper returns "busy"
+- Bot shows message + **Retry** button
+- Click Retry when GPU is free (no need to resend from Telegram)
+
+### Duplicate Audio Guard
+- Same audio within 60 seconds → skipped (avoids double processing)
+- Same audio after 60 seconds → processed (for testing)
+
+### GPU Stats
+- In Full mode stats: VRAM usage from Whisper `/health`
 
 ---
 
@@ -420,25 +524,25 @@ Quick mode toggle:
 ### Architecture
 
 **Components**:
-- **Bot Framework**: aiogram (async Telegram bot)
-- **AI Model**: OpenAI Whisper (Medium, local)
-- **Audio Processing**: FFmpeg (conversion, segmentation)
+- **Bot Framework**: aiogram (async Telegram bot) – runs in `bot` container
+- **Whisper API**: Flask server with OpenAI Whisper (Medium, ROCm) – runs in `whisper` container
+- **Audio Processing**: FFmpeg in bot (OGG→WAV), then HTTP POST to Whisper
 - **Token Counting**: tiktoken
-- **Environment**: Docker container
+- **Network**: Both on `TelegramNet`; bot calls `http://whisper:9000`
 
 **Processing Flow**:
 1. User sends voice → Telegram
-2. Bot downloads → Converts to WAV
-3. Checks size → Splits if >1MB (30s segments)
-4. Whisper processes → Segment by segment
+2. Bot downloads → Converts OGG to WAV
+3. Splits if >1MB (30s segments)
+4. POST each segment to Whisper API
 5. Accumulates text → Full transcription
 6. Sends results → Separate messages
-7. Cleans up → Deletes temp files
+7. Cleanup → Deletes temp files
 
 **Storage**:
 - **User Preferences**: In-memory (defaultdict)
 - **Audio Files**: Temporary (deleted after processing)
-- **Models**: Cached on disk (~1.5GB)
+- **Models**: Cached in Whisper container volume (~1.5GB)
 
 ### Performance
 
@@ -482,11 +586,16 @@ Quick mode toggle:
 BOT_TOKEN=your_telegram_bot_token_here
 ```
 
-**Docker Compose** (docker-compose.yml):
+**Docker Compose** (see [Two-Docker Deployment](#two-docker-deployment)):
 ```yaml
 services:
+  whisper:
+    build: ./whisper
+    # ROCm devices, memory limits...
   bot:
-    build: .
+    build: ./bot
+    environment:
+      - WHISPER_API_URL=http://whisper:9000
     volumes:
       - ./.env:/app/.env:ro
       - audio_temp:/app/audios
@@ -544,17 +653,19 @@ services:
 
 ## Deployment
 
-### Docker (Recommended)
-
-**Default: CPU-Only** (Faster build, no GPU needed)
+### Docker (Recommended) – Two Containers
 
 #### First Time Setup
 ```bash
 # Navigate to project
-cd /home/as/InnerVoice
+cd /path/to/InnerVoice
 
-# Build and start (CPU-only)
-docker compose up -d --build
+# Create .env with BOT_TOKEN
+echo "BOT_TOKEN=your_token" > .env
+
+# Build and start both (Whisper + Bot)
+make up
+# or: docker compose up -d --build
 ```
 
 #### Update Bot Code

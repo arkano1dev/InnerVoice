@@ -1,20 +1,64 @@
-version: '3.8'
+networks:
+  TelegramNet:
+    driver: bridge
 
 services:
-  bot:
-    build: .
-    volumes:
-      - ./.env:/app/.env:ro
-      # Temporary volume for audio processing
-      - audio_temp:/app/audios
+  whisper:
+    build:
+      context: ./whisper
+      dockerfile: Dockerfile
+    container_name: innervoice-whisper
     restart: unless-stopped
+    networks:
+      - TelegramNet
+    ports:
+      - "9000:9000"
+    volumes:
+      - whisper_cache:/root/.cache
     environment:
-      - TZ=UTC  # Set your timezone here
+      - WHISPER_MODEL=medium
+      - VRAM_THRESHOLD_FREE_MB=2048
     deploy:
       resources:
         limits:
-          memory: 10G  # Adjust based on your needs, especially for the Whisper model
+          memory: 6G
+          cpus: "4"
+    # ROCm / eGPU
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+    # Optional: match your Ollama ROCm setup
+    # environment:
+    #   - HSA_OVERRIDE_GFX_VERSION=11.0.0
+    #   - ROCR_VISIBLE_DEVICES=0
+
+  bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    container_name: innervoice-bot
+    restart: unless-stopped
+    depends_on:
+      - whisper
+    networks:
+      - TelegramNet
+    volumes:
+      - ./.env:/app/.env:ro
+      - audio_temp:/app/audios
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - WHISPER_API_URL=http://whisper:9000
+      - TZ=UTC
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
 
 volumes:
   audio_temp:
+    driver: local
+  whisper_cache:
     driver: local
