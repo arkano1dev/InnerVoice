@@ -4,10 +4,11 @@ networks:
 
 services:
   whisper:
+    # GPU (AMD ROCm). Do not apply low block I/O limits: model load needs normal disk I/O.
+    # If Whisper exits 139 or restarts, see docs/GPU-TROUBLESHOOTING.md
     build:
       context: ./whisper
       dockerfile: Dockerfile
-    image: innervoice-whisper:rocm
     container_name: innervoice-whisper
     restart: unless-stopped
     networks:
@@ -17,18 +18,15 @@ services:
     volumes:
       - whisper_cache:/root/.cache
     environment:
-      - WHISPER_MODEL=medium
-      - VRAM_THRESHOLD_FREE_MB=2048
-      # Use first GPU only (typically iGPU when no discrete GPU)
+      - WHISPER_MODEL=tiny
+      - VRAM_THRESHOLD_FREE_MB=1024
       - ROCR_VISIBLE_DEVICES=0
-      # Uncomment if ROCm doesn't detect your GPU (set to your gfx version, e.g. 11.0.3)
-      # - HSA_OVERRIDE_GFX_VERSION=11.0.3
+      - HSA_OVERRIDE_GFX_VERSION=11.0.3
     deploy:
       resources:
         limits:
           memory: 8G
           cpus: "4"
-    # AMD docs: required for ROCm in Docker (executable stack, GPU access)
     security_opt:
       - seccomp:unconfined
     cap_add:
@@ -40,6 +38,7 @@ services:
       - /dev/dri
     group_add:
       - video
+      - render
 
   bot:
     build:

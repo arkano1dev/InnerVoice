@@ -4,3 +4,4 @@ bot.log
 venv/
 __pycache__/
 *.pyc
+GPU-TROUBLESHOOTING.md
