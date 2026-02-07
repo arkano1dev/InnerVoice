@@ -20,6 +20,9 @@ services:
     environment:
       - WHISPER_MODEL=medium
       - WHISPER_FP16=true
+      - WHISPER_BEAM_SIZE=1
+      - WHISPER_CONDITION_ON_PREVIOUS_TEXT=false
+      - WHISPER_TORCH_COMPILE=true
       - VRAM_THRESHOLD_FREE_MB=1536
       - ROCR_VISIBLE_DEVICES=0
       - HSA_OVERRIDE_GFX_VERSION=11.0.0

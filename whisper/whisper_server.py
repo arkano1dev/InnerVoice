@@ -13,6 +13,9 @@ model_size = os.getenv("WHISPER_MODEL", "medium")
 VRAM_THRESHOLD_FREE_MB = int(os.getenv("VRAM_THRESHOLD_FREE_MB", "2048"))
 MODEL_PRELOAD = os.getenv("MODEL_PRELOAD", "false").lower() in ("1", "true", "yes")
 USE_FP16 = os.getenv("WHISPER_FP16", "true").lower() in ("1", "true", "yes")  # fp16 reduces VRAM for medium
+USE_TORCH_COMPILE = os.getenv("WHISPER_TORCH_COMPILE", "true").lower() in ("1", "true", "yes")  # PyTorch 2+ compile for ROCm speedup
+BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "1"))  # 1=greedy (fast), 5=default (slower, better accuracy)
+CONDITION_ON_PREVIOUS = os.getenv("WHISPER_CONDITION_ON_PREVIOUS_TEXT", "false").lower() in ("1", "true", "yes")
 
 # Lazy-load model on first request so the server can bind to port 9000 before any GPU load (avoids startup segfault on some ROCm setups)
 _model = None
@@ -47,6 +50,13 @@ def get_model():
             err = gpu.get("error", "GPU not available")
             raise RuntimeError(f"Cannot load model: {err}. Check ROCm/iGPU setup.")
         _model = whisper.load_model(model_size, device="cuda")
+        if USE_TORCH_COMPILE:
+            try:
+                import torch
+                _model = torch.compile(_model, mode="reduce-overhead")
+                logger.info("Applied torch.compile to Whisper model")
+            except Exception as e:
+                logger.warning("torch.compile failed, using eager: %s", e)
         logger.info("Loaded Whisper model: %s", model_size)
     except Exception as e:
         _model_load_error = e
@@ -131,6 +141,9 @@ def transcribe():
                 fp16=USE_FP16,
                 language=language if language else None,
                 verbose=False,
+                beam_size=BEAM_SIZE,
+                condition_on_previous_text=CONDITION_ON_PREVIOUS,
+                temperature=(0.0,),  # single temp avoids fallback loops
             )
         except Exception as e:
             logger.error(f"Transcription error: {e}")
