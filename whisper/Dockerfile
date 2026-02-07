@@ -7,11 +7,10 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install official Whisper from OpenAI with ROCm PyTorch
+# Install PyTorch from ROCm index, then Whisper/Flask from PyPI
 RUN pip install --no-cache-dir \
-    openai-whisper \
-    flask \
-    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.0
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.0 && \
+    pip install --no-cache-dir openai-whisper flask
 
 WORKDIR /app
 
