@@ -7,6 +7,7 @@ services:
     build:
       context: ./whisper
       dockerfile: Dockerfile
+    image: innervoice-whisper:rocm
     container_name: innervoice-whisper
     restart: unless-stopped
     networks:
@@ -18,18 +19,22 @@ services:
     environment:
       - WHISPER_MODEL=medium
       - VRAM_THRESHOLD_FREE_MB=2048
-      # iGPU only: use device 0 (typically integrated). Omit or set to "0,1" if you have dGPU too.
+      # Use first GPU only (typically iGPU when no discrete GPU)
       - ROCR_VISIBLE_DEVICES=0
-      # Uncomment for AMD APU if ROCm doesn't detect it (e.g. Renoir/Vega: 11.0.0, Rembrandt: 10.3.0)
-      # - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      # Uncomment if ROCm doesn't detect your GPU (set to your gfx version, e.g. 11.0.3)
+      # - HSA_OVERRIDE_GFX_VERSION=11.0.3
     deploy:
       resources:
         limits:
-          memory: 6G
+          memory: 8G
           cpus: "4"
-    # ROCm for iGPU: need kfd + dri and seccomp unconfined for libamdhip64 executable stack
+    # AMD docs: required for ROCm in Docker (executable stack, GPU access)
     security_opt:
       - seccomp:unconfined
+    cap_add:
+      - SYS_PTRACE
+    ipc: host
+    shm_size: "8g"
     devices:
       - /dev/kfd
       - /dev/dri

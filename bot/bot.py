@@ -533,7 +533,9 @@ async def handle_voice(message: types.Message):
     with open(file_path, "wb") as f:
         f.write(voice.read())
 
-    await audio_queue.put((user_id, file_id, file_path))
+    # Telegram API expects business_connection_id as string when editing messages in business context
+    business_connection_id = getattr(message, "business_connection_id", None)
+    await audio_queue.put((user_id, file_id, file_path, business_connection_id))
 
 
 # --- Helpers ---
@@ -545,19 +547,23 @@ async def send_message_safe(
     parse_mode: str = None,
     reply_to_message_id: int = None,
     reply_markup: InlineKeyboardMarkup = None,
+    business_connection_id=None,
 ) -> Optional[types.Message]:
     if not text or text.isspace():
         return None
+    send_kwargs = {
+        "chat_id": user_id,
+        "text": text,
+        "parse_mode": parse_mode,
+        "reply_to_message_id": reply_to_message_id,
+        "reply_markup": reply_markup,
+    }
+    if business_connection_id is not None:
+        send_kwargs["business_connection_id"] = str(business_connection_id)
     for attempt in range(3):
         try:
             msg = await asyncio.wait_for(
-                bot.send_message(
-                    user_id,
-                    text,
-                    parse_mode=parse_mode,
-                    reply_to_message_id=reply_to_message_id,
-                    reply_markup=reply_markup,
-                ),
+                bot.send_message(**send_kwargs),
                 timeout=TELEGRAM_TIMEOUT,
             )
             return msg
@@ -593,7 +599,13 @@ async def send_text_in_chunks(user_id: int, text: str, max_length: int = 4096) -
 
 
 async def update_progress(
-    user_id: int, message_id: int, current: int, total: int, elapsed_time: float, extra_info: str = ""
+    user_id: int,
+    message_id: int,
+    current: int,
+    total: int,
+    elapsed_time: float,
+    extra_info: str = "",
+    business_connection_id=None,
 ) -> None:
     try:
         pct = (current / total) * 100 if total > 0 else 0
@@ -603,7 +615,10 @@ async def update_progress(
         text = f"⚡ <b>Processing</b>\n\n{bar} {pct:.0f}%\nSegment: {current}/{total}\nElapsed: {elapsed_time:.1f}s\nETA: {int(eta)}s\n"
         if extra_info:
             text += f"\n{extra_info}"
-        await bot.edit_message_text(text, user_id, message_id, parse_mode="HTML")
+        kwargs = {"text": text, "chat_id": user_id, "message_id": message_id, "parse_mode": "HTML"}
+        if business_connection_id is not None:
+            kwargs["business_connection_id"] = str(business_connection_id)
+        await bot.edit_message_text(**kwargs)
     except Exception as e:
         logging.error(f"Error updating progress: {e}")
 
@@ -653,7 +668,9 @@ async def process_audio_chunk(
     return await _call_whisper_api(segment, task, language, return_segments)
 
 
-async def process_audio_async(user_id: int, file_id: str, file_path: str):
+async def process_audio_async(
+    user_id: int, file_id: str, file_path: str, business_connection_id=None
+):
     """Main audio processing with Whisper API."""
     wav_path = Path(file_path).with_suffix(".wav")
     prefs = user_preferences[user_id]
@@ -695,6 +712,7 @@ async def process_audio_async(user_id: int, file_id: str, file_path: str):
             f"{get_text(user_id, 'segments')}: {len(segments)}\n"
             f"⏱️ ~{estimated_time}s\n\n{get_text(user_id, 'processing')}",
             parse_mode="HTML",
+            business_connection_id=business_connection_id,
         )
         if status_msg:
             progress_msg_id = status_msg.message_id
@@ -711,7 +729,14 @@ async def process_audio_async(user_id: int, file_id: str, file_path: str):
                 if progress_msg_id:
                     elapsed = time.time() - start_time
                     if len(segments) <= 5 or i % 2 == 0:
-                        await update_progress(user_id, progress_msg_id, i - 1, len(segments), elapsed)
+                        await update_progress(
+                            user_id,
+                            progress_msg_id,
+                            i - 1,
+                            len(segments),
+                            elapsed,
+                            business_connection_id=business_connection_id,
+                        )
 
                 if prefs["mode"] == "fast":
                     result = await process_audio_chunk(
@@ -756,15 +781,20 @@ async def process_audio_async(user_id: int, file_id: str, file_path: str):
         if progress_msg_id:
             try:
                 done_text = "✨ ¡Completado!" if prefs.get("ui_language") == "es" else "✨ Complete!"
-                await bot.edit_message_text(
-                    f"{get_text(user_id, 'audio_received')}\n\n"
-                    f"{get_text(user_id, 'duration')}: {int(duration)}s\n"
-                    f"{get_text(user_id, 'language')}: {lang_info['flag']} {lang_info['name']}\n"
-                    f"⏱️ Real: {elapsed_time:.1f}s\n\n{done_text}",
-                    user_id,
-                    progress_msg_id,
-                    parse_mode="HTML",
-                )
+                edit_kwargs = {
+                    "text": (
+                        f"{get_text(user_id, 'audio_received')}\n\n"
+                        f"{get_text(user_id, 'duration')}: {int(duration)}s\n"
+                        f"{get_text(user_id, 'language')}: {lang_info['flag']} {lang_info['name']}\n"
+                        f"⏱️ Real: {elapsed_time:.1f}s\n\n{done_text}"
+                    ),
+                    "chat_id": user_id,
+                    "message_id": progress_msg_id,
+                    "parse_mode": "HTML",
+                }
+                if business_connection_id is not None:
+                    edit_kwargs["business_connection_id"] = str(business_connection_id)
+                await bot.edit_message_text(**edit_kwargs)
             except Exception as e:
                 logging.error(f"Error updating final status: {e}")
 
@@ -847,8 +877,14 @@ async def split_audio(wav_path: Path) -> List[Path]:
 async def audio_worker():
     while True:
         try:
-            user_id, file_id, file_path = await audio_queue.get()
-            await process_audio_async(user_id, file_id, file_path)
+            item = await audio_queue.get()
+            # Support both (user_id, file_id, file_path) and (user_id, file_id, file_path, business_connection_id)
+            if len(item) == 4:
+                user_id, file_id, file_path, business_connection_id = item
+            else:
+                user_id, file_id, file_path = item
+                business_connection_id = None
+            await process_audio_async(user_id, file_id, file_path, business_connection_id)
         except Exception as e:
             logging.error(f"Error in audio worker: {e}")
             await asyncio.sleep(1)
