@@ -1,3 +1,4 @@
+# Run from project root (directory containing docker-compose.yml)
 .PHONY: up down up-bot up-whisper build logs
 
 up:

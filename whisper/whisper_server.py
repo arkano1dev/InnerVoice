@@ -5,8 +5,6 @@ import subprocess
 import logging
 from flask import Flask, request, jsonify
 
-import whisper
-
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -14,9 +12,18 @@ logger = logging.getLogger(__name__)
 model_size = os.getenv("WHISPER_MODEL", "medium")
 VRAM_THRESHOLD_FREE_MB = int(os.getenv("VRAM_THRESHOLD_FREE_MB", "2048"))
 
-# Load model at startup
-model = whisper.load_model(model_size)
-logger.info(f"Loaded Whisper model: {model_size}")
+# Lazy-load model on first request so the server can bind to port 9000 before any GPU load (avoids startup segfault on some ROCm setups)
+_model = None
+
+
+def get_model():
+    global _model
+    if _model is None:
+        import whisper
+        logger.info("Loading Whisper model %s (first request)...", model_size)
+        _model = whisper.load_model(model_size)
+        logger.info("Loaded Whisper model: %s", model_size)
+    return _model
 
 
 def get_vram_stats():
@@ -89,7 +96,7 @@ def transcribe():
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         try:
             audio_file.save(tmp.name)
-            result = model.transcribe(
+            result = get_model().transcribe(
                 tmp.name,
                 task=task,
                 fp16=False,
@@ -113,13 +120,14 @@ def transcribe():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check with optional GPU/VRAM stats."""
-    used_mb, total_mb = get_vram_stats()
+    """Health check with optional GPU/VRAM stats (only after model loaded to avoid GPU init at startup)."""
     resp = {"status": "healthy", "model": model_size}
-    if used_mb is not None and total_mb is not None:
-        resp["vram_used_mb"] = used_mb
-        resp["vram_total_mb"] = total_mb
-        resp["vram_free_mb"] = total_mb - used_mb
+    if _model is not None:
+        used_mb, total_mb = get_vram_stats()
+        if used_mb is not None and total_mb is not None:
+            resp["vram_used_mb"] = used_mb
+            resp["vram_total_mb"] = total_mb
+            resp["vram_free_mb"] = total_mb - used_mb
     return jsonify(resp)
 
 

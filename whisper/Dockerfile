@@ -1,14 +1,11 @@
-# Whisper API on AMD iGPU (integrated GPU / APU)
-# Uses official ROCm 7.2 PyTorch image - avoids libamdhip64 executable-stack issues
-# Requires AMD APU or GPU with ROCm 7.x support
-FROM rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.9.1
+# Whisper API - GPU (AMD ROCm). Uses prebuilt rocm/pytorch image.
+# latest tag can be more stable on some hosts than a specific 7.2 tag
+FROM rocm/pytorch:latest
 
-# ffmpeg for audio handling
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# openai-whisper uses existing PyTorch from base (ROCm)
 RUN pip install --no-cache-dir openai-whisper flask
 
 WORKDIR /app
