@@ -21,7 +21,7 @@ services:
       - WHISPER_MODEL=tiny
       - VRAM_THRESHOLD_FREE_MB=1024
       - ROCR_VISIBLE_DEVICES=0
-      - HSA_OVERRIDE_GFX_VERSION=11.0.3
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0
     deploy:
       resources:
         limits:
