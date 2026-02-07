@@ -18,21 +18,23 @@ services:
     environment:
       - WHISPER_MODEL=medium
       - VRAM_THRESHOLD_FREE_MB=2048
+      # iGPU only: use device 0 (typically integrated). Omit or set to "0,1" if you have dGPU too.
+      - ROCR_VISIBLE_DEVICES=0
+      # Uncomment for AMD APU if ROCm doesn't detect it (e.g. Renoir/Vega: 11.0.0, Rembrandt: 10.3.0)
+      # - HSA_OVERRIDE_GFX_VERSION=11.0.0
     deploy:
       resources:
         limits:
           memory: 6G
           cpus: "4"
-    # ROCm / eGPU
+    # ROCm for iGPU: need kfd + dri and seccomp unconfined for libamdhip64 executable stack
+    security_opt:
+      - seccomp:unconfined
     devices:
       - /dev/kfd
       - /dev/dri
     group_add:
       - video
-    # Optional: match your Ollama ROCm setup
-    # environment:
-    #   - HSA_OVERRIDE_GFX_VERSION=11.0.0
-    #   - ROCR_VISIBLE_DEVICES=0
 
   bot:
     build:
