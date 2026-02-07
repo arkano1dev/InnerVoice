@@ -2,7 +2,7 @@
 
 **Version 3.0.0** - Privacy-First Voice Transcription Bot
 
-InnerVoice is a Telegram bot that transcribes and translates voice messages using OpenAI's Whisper model. Built with [aiogram](https://docs.aiogram.dev), the bot runs as **two Docker containers**: a lightweight Telegram bot and a Whisper API service (ROCm/eGPU). Send voice → get transcription + translation.
+InnerVoice is a Telegram bot that transcribes and translates voice messages using OpenAI's Whisper model. Built with [aiogram](https://docs.aiogram.dev), the bot runs as **two Docker containers**: a lightweight Telegram bot and a Whisper API service (Whisper on **AMD GPU via ROCm**). Send voice → get transcription + translation.
 
 ## 📚 Documentation
 
@@ -11,20 +11,23 @@ InnerVoice is a Telegram bot that transcribes and translates voice messages usin
 
 ## Quick Start
 
+Run all commands from the **project root** (directory that contains `docker-compose.yml`).
+
 ```bash
-# Clone and setup
-cd InnerVoice
+# Clone and go to project root
+git clone <repo-url> InnerVoice && cd InnerVoice
 
 # Configure your bot token in .env
 echo "BOT_TOKEN=your_token_here" > .env
 
 # Start both containers (Whisper + Bot)
 make up
-# or: ./deploy.sh up
 # or: docker compose up -d --build
 
 # Test: Send /start to your bot in Telegram, then a voice message
 ```
+
+**GPU (ROCm):** Default is AMD GPU (`rocm/pytorch:latest`, tiny model, lazy load). If Whisper exits 139 or restarts: ensure user is in `video` and `render` groups; see DOCUMENTATION.md troubleshooting. Optional local file **GPU-TROUBLESHOOTING.md** (gitignored) may exist with extra steps. CPU fallback: set `dockerfile: Dockerfile.cpu` for whisper and remove ROCm options in `docker-compose.yml`.
 
 ## Table of Contents
 

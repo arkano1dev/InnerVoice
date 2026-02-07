@@ -1,0 +1,20 @@
+# Whisper API - CPU fallback (use when ROCm/GPU fails or no AMD GPU)
+# In docker-compose.yml set build.dockerfile: Dockerfile.cpu and remove ROCm options
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir openai-whisper flask
+
+WORKDIR /app
+COPY whisper_server.py /app/
+
+EXPOSE 9000
+ENV WHISPER_MODEL=medium
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "whisper_server.py"]

@@ -51,16 +51,18 @@ InnerVoice runs as **two separate containers** on the `TelegramNet` network:
 
 | Service | Role | Limits | Hardware |
 |---------|------|--------|----------|
-| **whisper** | Whisper API (Flask, ROCm) | 6G RAM, 4 CPUs | eGPU / ROCm |
+| **whisper** | Whisper API (Flask) | 8G RAM, 4 CPUs | AMD GPU (ROCm) |
 | **bot** | Telegram bot (aiogram) | 512M RAM | CPU only |
 
 ### Architecture
 
-- **Whisper container**: Loads the medium model, exposes `/transcribe` and `/health` on port 9000. Runs on ROCm/eGPU.
+- **Whisper container**: Uses model from `WHISPER_MODEL` (default in compose: **tiny**). **Lazy-loads** on first transcription so the server binds to port 9000 immediately. Exposes `/transcribe` and `/health`. Runs on **AMD GPU via ROCm** (image: `rocm/pytorch:latest`). Compose uses AMD-recommended options: `seccomp=unconfined`, `SYS_PTRACE`, `ipc=host`, `shm_size: 8g`, `/dev/kfd`, `/dev/dri`, `video` and `render` groups.
 - **Bot container**: Receives voice from Telegram, converts OGG→WAV with ffmpeg, sends WAV to Whisper API via HTTP. Lightweight, no GPU.
 - **Network**: Both join `TelegramNet`; bot reaches Whisper at `http://whisper:9000`.
 
 ### Deploy Commands
+
+Run from the **project root** (directory containing `docker-compose.yml`); otherwise you may see "no configuration file provided".
 
 ```bash
 # Start both
@@ -85,40 +87,39 @@ make logs-bot
 make logs-whisper
 ```
 
-### ROCm / eGPU Setup
+### ROCm / GPU Setup
 
-Whisper uses ROCm 6.0 PyTorch. Ensure your host has:
+**Default is GPU (ROCm).** The compose file uses AMD's recommended run options for the prebuilt `rocm/pytorch` image:
 
-- AMD GPU with ROCm support
-- `/dev/kfd` and `/dev/dri` available
-- User in `video` group
+- `security_opt: seccomp=unconfined`, `cap_add: SYS_PTRACE`, `ipc: host`, `shm_size: 8g`
+- `devices: /dev/kfd`, `/dev/dri`, `group_add: video`, `group_add: render`
+- `ROCR_VISIBLE_DEVICES=0`, `HSA_OVERRIDE_GFX_VERSION=11.0.3` (compose default for APU/iGPU; change if needed)
+- `WHISPER_MODEL=tiny`, `VRAM_THRESHOLD_FREE_MB=1024` (compose default; use `medium` or `small` and higher threshold if you have more VRAM)
+
+**Host requirements:** AMD GPU with ROCm support, `/dev/kfd` and `/dev/dri` available, user in `video` and `render` groups.
+
+**CPU fallback:** If Whisper keeps restarting or you have no AMD GPU, use CPU: in `docker-compose.yml` set `build.dockerfile: Dockerfile.cpu` for the whisper service and remove the ROCm-specific options (security_opt, cap_add, ipc, shm_size, devices, group_add, ROCR_VISIBLE_DEVICES).
 
 If you run **Ollama** on the same GPU, Whisper is **lower priority**:
 
-- Whisper checks VRAM before processing; if free VRAM &lt; 2 GB, returns `503 gpu_busy`
+- Whisper checks VRAM before processing; if free VRAM &lt; threshold (`VRAM_THRESHOLD_FREE_MB`, default 1024 in compose), returns `503 gpu_busy`
 - Bot shows “Whisper is busy” and a **Retry** button
 - Ollama takes precedence; when Ollama frees VRAM, use Retry
 
-To match your Ollama device (e.g. eGPU on device 1), add to `docker-compose.yml`:
-
-```yaml
-environment:
-  - HSA_OVERRIDE_GFX_VERSION=11.0.0
-  - ROCR_VISIBLE_DEVICES=0   # or 1 for eGPU
-```
+To use a different GPU (e.g. eGPU on device 1), set `ROCR_VISIBLE_DEVICES=1` (or the desired index) in the whisper service `environment` in `docker-compose.yml`.
 
 ### Resource Limits
 
-- **Whisper**: 6G memory, 4 CPUs (tune in `docker-compose.yml` if needed)
+- **Whisper**: 8G memory, 4 CPUs (tune in `docker-compose.yml` if needed)
 - **Bot**: 512M memory, 0.5 CPU
-- Adjust `VRAM_THRESHOLD_FREE_MB` (default 2048) to change busy detection
+- `VRAM_THRESHOLD_FREE_MB`: compose default 1024 (for tiny model); increase if using a larger model
 
 ### Reusing Whisper
 
 The Whisper container can be used by other apps: it exposes `http://whisper:9000` (or `localhost:9000` if port is published) with:
 
-- `POST /transcribe` – multipart form: `audio` (WAV), optional `language`, `task` (transcribe/translate), `return_segments`
-- `GET /health` – status + `vram_used_mb`, `vram_total_mb`
+- `POST /transcribe` – multipart form: `audio` (WAV), optional `language`, `task` (transcribe/translate), `return_segments`. Model is loaded on first request (lazy).
+- `GET /health` – `status`, `model`; `vram_used_mb` / `vram_total_mb` only after the model has been loaded
 
 ---
 
@@ -851,6 +852,31 @@ docker compose logs -f bot
 2. Increase memory limit in docker-compose.yml
 3. Try shorter audio clip
 4. Check audio plays in Telegram
+
+### Bot: "Cannot connect to host whisper:9000"
+
+**What you see**: Bot logs `Error processing segment X: Cannot connect to host whisper:9000 [Connect call failed (...)]` for every segment.
+
+**Root cause**: The Whisper container is **not staying up** (restart loop). The bot error is a **symptom**: nothing is listening on port 9000 because Whisper keeps crashing or never finishes starting.
+
+**What to do**:
+
+1. **Confirm Whisper is unstable**:
+   ```bash
+   docker compose ps
+   ```
+   If whisper shows "restarting" or exits soon after start, the service is down most of the time.
+
+2. **Check Whisper logs** for the real failure (OOM, I/O, ROCm, etc.):
+   ```bash
+   docker compose logs whisper --tail 200
+   ```
+
+3. **Relax or remove block I/O limits**: If the host or an override applies a **low block I/O limit** (e.g. ~tens of KB/s) to the whisper container, model loading and cache I/O become unsustainable and the process can hang or be killed, causing a restart loop. Ensure the whisper service is **not** subject to strict `blkio` limits (in docker-compose, on the host, or in your orchestrator). The project's compose does not set block I/O limits; if you use an override or host cgroups that cap I/O, raise or remove them for the whisper container.
+
+4. **After Whisper is stable**: Once the whisper container runs and listens on 9000, the "Cannot connect to whisper:9000" errors in the bot will stop. The network (e.g. `TelegramNet`) is fine; the issue is the service not being up.
+
+5. **Whisper exits 139 (segfault) or restarts**: If you have a local **GPU-TROUBLESHOOTING.md** (optional, gitignored), see it for a full brainstorm. Otherwise: ensure host has `video` and `render` groups, try `WHISPER_MODEL=tiny`, `HSA_OVERRIDE_GFX_VERSION=11.0.3`, image `rocm/pytorch:latest`; or run Whisper on the host and point the bot at it.
 
 ### Out of Memory
 
