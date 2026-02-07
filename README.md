@@ -27,7 +27,7 @@ make up
 # Test: Send /start to your bot in Telegram, then a voice message
 ```
 
-**GPU (ROCm):** Default is AMD GPU (`rocm/pytorch:latest`, tiny model, lazy load). If Whisper exits 139 or restarts: ensure user is in `video` and `render` groups; see DOCUMENTATION.md troubleshooting. Optional local file **GPU-TROUBLESHOOTING.md** (gitignored) may exist with extra steps. CPU fallback: set `dockerfile: Dockerfile.cpu` for whisper and remove ROCm options in `docker-compose.yml`.
+**GPU (ROCm):** Default is AMD GPU (`rocm/pytorch:latest`, medium model, Gunicorn, lazy load). If Whisper exits 139 or restarts: ensure user is in `video` and `render` groups; see DOCUMENTATION.md troubleshooting. Optional local file **GPU-TROUBLESHOOTING.md** (gitignored) may exist with extra steps. CPU fallback: set `dockerfile: Dockerfile.cpu` for whisper and remove ROCm options in `docker-compose.yml`.
 
 ## Table of Contents
 
