@@ -1,5 +1,13 @@
 # InnerVoice Bot - Changelog
 
+## Unreleased
+
+### Long audio handling
+- **Bot**: Increased Whisper request timeout and added retries for segment requests (5xx and connection errors) so long files (e.g. 15+ minutes) are more likely to complete after transient failures.
+- **Whisper**: Clear GPU cache after each transcription to reduce memory fragmentation when processing many segments in sequence.
+
+---
+
 ## Version 2.2.0 - Complete Spanish UI & CPU-Only Default (November 2025)
 
 ### 🎯 Critical Improvements

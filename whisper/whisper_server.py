@@ -108,6 +108,17 @@ def check_vram_available():
     return free_mb >= VRAM_THRESHOLD_FREE_MB
 
 
+def _gpu_cache_clear():
+    """Release GPU cache after each transcribe to reduce VRAM fragmentation over many chunks (long audio)."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except Exception as e:
+        logger.debug("GPU cache clear: %s", e)
+
+
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
     """Transcribe or translate audio. Accepts audio file + optional params: language, task, return_segments."""
@@ -147,12 +158,15 @@ def transcribe():
             )
         except Exception as e:
             logger.error(f"Transcription error: {e}")
+            _gpu_cache_clear()
             return jsonify({"error": str(e)}), 500
         finally:
             try:
                 os.unlink(tmp.name)
             except OSError:
                 pass
+            # Reduce VRAM fragmentation / driver stress over many chunks (long audio)
+            _gpu_cache_clear()
 
     out = {"text": result.get("text", "").strip()}
     if return_segments and "segments" in result:

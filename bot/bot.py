@@ -26,7 +26,8 @@ WHISPER_API_URL = os.getenv("WHISPER_API_URL", "http://whisper:9000")
 
 # Adjust these constants
 TELEGRAM_TIMEOUT = 200
-WHISPER_TIMEOUT = 300
+WHISPER_TIMEOUT = 600  # long audio = many segments; allow enough time per request (GPU can be slow or recovering)
+WHISPER_RETRIES = 2    # retry segment on 5xx / connection error (e.g. after service restart)
 DUPLICATE_COOLDOWN_SEC = 60
 LAST_PROCESSED_MAX_AGE = 600  # Evict entries older than 10 min
 
@@ -637,7 +638,7 @@ def count_tokens(text: str) -> int:
 async def _call_whisper_api(
     segment_path: Path, task: str, language: Optional[str], return_segments: bool
 ) -> dict:
-    """Call Whisper API for transcription. Raises WhisperBusyError on 503."""
+    """Call Whisper API for transcription. Raises WhisperBusyError on 503. Retries on 5xx/connection errors."""
     url = f"{WHISPER_API_URL.rstrip('/')}/transcribe"
     data = aiohttp.FormData()
     data.add_field("task", task)
@@ -646,19 +647,38 @@ async def _call_whisper_api(
         data.add_field("language", language)
     data.add_field("audio", segment_path.read_bytes(), filename=segment_path.name, content_type="audio/wav")
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=WHISPER_TIMEOUT)) as resp:
-            if resp.status == 503:
-                try:
-                    body = await resp.json()
-                    if body.get("error") == "gpu_busy":
-                        raise WhisperBusyError(body.get("message", "GPU busy"))
-                except aiohttp.ContentTypeError:
-                    pass
-                raise WhisperBusyError("Service unavailable")
-            resp.raise_for_status()
-            result = await resp.json()
-            return {"text": result.get("text", "").strip(), "segments": result.get("segments", [])}
+    last_error = None
+    for attempt in range(WHISPER_RETRIES + 1):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=WHISPER_TIMEOUT)) as resp:
+                    if resp.status == 503:
+                        try:
+                            body = await resp.json()
+                            if body.get("error") == "gpu_busy":
+                                raise WhisperBusyError(body.get("message", "GPU busy"))
+                        except aiohttp.ContentTypeError:
+                            pass
+                        raise WhisperBusyError("Service unavailable")
+                    if resp.status >= 500:
+                        last_error = RuntimeError(f"Whisper HTTP {resp.status}")
+                        if attempt < WHISPER_RETRIES:
+                            await asyncio.sleep(3 * (attempt + 1))
+                            continue
+                        resp.raise_for_status()
+                    resp.raise_for_status()
+                    result = await resp.json()
+                    return {"text": result.get("text", "").strip(), "segments": result.get("segments", [])}
+        except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as e:
+            last_error = e
+            if attempt < WHISPER_RETRIES:
+                logging.warning("Whisper request failed (attempt %s/%s), retrying: %s", attempt + 1, WHISPER_RETRIES + 1, e)
+                await asyncio.sleep(3 * (attempt + 1))
+            else:
+                raise
+    if last_error:
+        raise last_error
+    raise RuntimeError("Whisper request failed")
 
 
 async def process_audio_chunk(
