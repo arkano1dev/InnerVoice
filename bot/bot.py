@@ -575,26 +575,85 @@ async def send_message_safe(
     return None
 
 
-async def send_text_in_chunks(user_id: int, text: str, max_length: int = 4096) -> bool:
-    if not text or text.isspace():
-        return False
+def _escape_html(text: str) -> str:
+    """Escape for HTML so <pre> content is safe."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _split_text_chunks(text: str, max_length: int) -> List[str]:
+    """Split text into chunks of at most max_length, breaking at newlines when possible."""
+    if not text or not text.strip():
+        return []
     if len(text) <= max_length:
-        await send_message_safe(user_id, text)
-        return True
+        return [text.strip()]
     chunks = []
     current = ""
     for line in text.split("\n"):
-        if len(current) + len(line) + 1 <= max_length:
-            current += line + "\n"
+        line_avec = line + "\n"
+        if len(current) + len(line_avec) <= max_length:
+            current += line_avec
         else:
             if current:
                 chunks.append(current.rstrip())
-            current = line + "\n" if len(line) <= max_length else ""
+            if len(line) <= max_length:
+                current = line_avec
+            else:
+                # Single line longer than max_length: split by character
+                current = ""
+                start = 0
+                while start < len(line):
+                    end = min(start + max_length, len(line))
+                    chunks.append(line[start:end])
+                    start = end
     if current:
         chunks.append(current.rstrip())
-    for i, chunk in enumerate(chunks, 1):
-        prefix = f"━━ Part {i}/{len(chunks)} ━━\n\n" if len(chunks) > 1 else ""
-        await send_message_safe(user_id, prefix + chunk)
+    return chunks
+
+
+def _chunk_then_escape(text: str, max_escaped: int) -> List[str]:
+    """Split text into chunks that after HTML escape are each <= max_escaped. Never splits inside &...;."""
+    if not text or not text.strip():
+        return []
+    # Start with a safe raw chunk size; escaping can grow (e.g. & -> &amp;)
+    raw_max = max(800, max_escaped - 100)
+    raw_chunks = _split_text_chunks(text, raw_max)
+    out = []
+    for raw in raw_chunks:
+        escaped = _escape_html(raw)
+        if len(escaped) <= max_escaped:
+            out.append(escaped)
+        else:
+            # Escape made it too long; split raw into smaller pieces
+            out.extend(_chunk_then_escape(raw, max_escaped))
+    return out
+
+
+async def send_text_in_chunks(
+    user_id: int,
+    text: str,
+    max_length: int = 4096,
+    plain: bool = False,
+    copyable: bool = True,
+) -> bool:
+    """Send text in messages of at most max_length (Telegram limit 4096).
+    If plain=True, no 'Part X/Y' labels. If copyable=True, wrap in <pre> so tap-to-copy works."""
+    if copyable:
+        pre_max = max_length - 11  # "<pre></pre>"
+        chunks = _chunk_then_escape(text, pre_max)
+    elif not plain:
+        chunks = _split_text_chunks(text, max_length - 25)
+    else:
+        chunks = _split_text_chunks(text, max_length)
+    if not chunks:
+        return False
+    for i, chunk in enumerate(chunks):
+        if not plain and len(chunks) > 1:
+            prefix = f"━━ Part {i + 1}/{len(chunks)} ━━\n\n"
+            await send_message_safe(user_id, prefix + chunk)
+        elif copyable:
+            await send_message_safe(user_id, f"<pre>{chunk}</pre>", parse_mode="HTML")
+        else:
+            await send_message_safe(user_id, chunk)
         await asyncio.sleep(0.2)
     return True
 
@@ -834,7 +893,7 @@ async def process_audio_async(
                 if prefs["timestamps"] and transcription_segments
                 else full_transcription.strip()
             )
-            await send_text_in_chunks(user_id, text_to_send)
+            await send_text_in_chunks(user_id, text_to_send, plain=True)
 
         if full_translation.strip():
             header = get_text(user_id, "translation_header") if prefs["mode"] == "full" else get_text(user_id, "transcription_header")
@@ -844,7 +903,7 @@ async def process_audio_async(
                 if prefs["timestamps"] and translation_segments and prefs["mode"] == "fast"
                 else full_translation.strip()
             )
-            await send_text_in_chunks(user_id, text_to_send)
+            await send_text_in_chunks(user_id, text_to_send, plain=True)
 
         if prefs["show_stats"]:
             transcription_tokens = count_tokens(full_transcription) if full_transcription else 0
