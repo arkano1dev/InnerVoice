@@ -160,8 +160,12 @@ def create_ui_language_keyboard() -> InlineKeyboardMarkup:
 
 
 def create_retry_keyboard(file_id: str) -> InlineKeyboardMarkup:
-    """Create Retry button for when Whisper is busy."""
-    keyboard = [[InlineKeyboardButton(text="🔄 Retry", callback_data=f"retry_{file_id}")]]
+    """Create Retry button for when Whisper is busy.
+
+    Telegram limits callback_data to 64 bytes. File IDs can be longer, so we
+    keep the per-user pending mapping in memory and use a short constant here.
+    """
+    keyboard = [[InlineKeyboardButton(text="🔄 Retry", callback_data="retry")]]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
@@ -496,7 +500,7 @@ async def toggle_timestamps_callback(callback_query: types.CallbackQuery):
     await callback_query.answer()
 
 
-@dp.callback_query(lambda c: c.data and c.data.startswith("retry_"))
+@dp.callback_query(lambda c: c.data == "retry")
 async def retry_callback(callback_query: types.CallbackQuery):
     """Re-enqueue last rejected audio (Whisper busy) for processing."""
     user_id = callback_query.from_user.id
