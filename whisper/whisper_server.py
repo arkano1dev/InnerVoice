@@ -1,8 +1,11 @@
 """Whisper API server - Flask-based transcription service with ROCm/GPU support."""
 import os
+import gc
+import time
 import tempfile
 import subprocess
 import logging
+import threading
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -17,9 +20,15 @@ USE_TORCH_COMPILE = os.getenv("WHISPER_TORCH_COMPILE", "true").lower() in ("1", 
 BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "1"))  # 1=greedy (fast), 5=default (slower, better accuracy)
 CONDITION_ON_PREVIOUS = os.getenv("WHISPER_CONDITION_ON_PREVIOUS_TEXT", "false").lower() in ("1", "true", "yes")
 
+# Idle-unload tuning: unload Whisper from GPU after this many seconds without use
+IDLE_UNLOAD_SECONDS = int(os.getenv("WHISPER_IDLE_UNLOAD_SECONDS", str(15 * 60)))
+IDLE_CHECK_INTERVAL_SECONDS = int(os.getenv("WHISPER_IDLE_CHECK_INTERVAL_SECONDS", "60"))
+
 # Lazy-load model on first request so the server can bind to port 9000 before any GPU load (avoids startup segfault on some ROCm setups)
 _model = None
 _model_load_error = None
+_last_used_monotonic = None
+_model_lock = threading.Lock()
 
 
 def _probe_gpu():
@@ -36,32 +45,43 @@ def _probe_gpu():
 
 
 def get_model():
-    global _model, _model_load_error
+    global _model, _model_load_error, _last_used_monotonic
+    # Fast path without lock if model is already loaded
     if _model is not None:
+        _last_used_monotonic = time.monotonic()
         return _model
     if _model_load_error is not None:
         raise RuntimeError(_model_load_error) from _model_load_error
 
-    import whisper
-    logger.info("Loading Whisper model %s (first request)...", model_size)
-    try:
-        gpu = _probe_gpu()
-        if not gpu.get("available"):
-            err = gpu.get("error", "GPU not available")
-            raise RuntimeError(f"Cannot load model: {err}. Check ROCm/iGPU setup.")
-        _model = whisper.load_model(model_size, device="cuda")
-        if USE_TORCH_COMPILE:
-            try:
-                import torch
-                _model = torch.compile(_model, mode="reduce-overhead")
-                logger.info("Applied torch.compile to Whisper model")
-            except Exception as e:
-                logger.warning("torch.compile failed, using eager: %s", e)
-        logger.info("Loaded Whisper model: %s", model_size)
-    except Exception as e:
-        _model_load_error = e
-        logger.exception("Failed to load Whisper model: %s", e)
-        raise
+    with _model_lock:
+        # Re-check inside lock to avoid double-load
+        if _model is not None:
+            _last_used_monotonic = time.monotonic()
+            return _model
+        if _model_load_error is not None:
+            raise RuntimeError(_model_load_error) from _model_load_error
+
+        import whisper
+        logger.info("Loading Whisper model %s (first request or after idle unload)...", model_size)
+        try:
+            gpu = _probe_gpu()
+            if not gpu.get("available"):
+                err = gpu.get("error", "GPU not available")
+                raise RuntimeError(f"Cannot load model: {err}. Check ROCm/iGPU setup.")
+            _model = whisper.load_model(model_size, device="cuda")
+            if USE_TORCH_COMPILE:
+                try:
+                    import torch
+                    _model = torch.compile(_model, mode="reduce-overhead")
+                    logger.info("Applied torch.compile to Whisper model")
+                except Exception as e:
+                    logger.warning("torch.compile failed, using eager: %s", e)
+            logger.info("Loaded Whisper model: %s", model_size)
+            _last_used_monotonic = time.monotonic()
+        except Exception as e:
+            _model_load_error = e
+            logger.exception("Failed to load Whisper model: %s", e)
+            raise
     return _model
 
 
@@ -194,6 +214,59 @@ def gpu_check():
     return jsonify({"gpu": probe, "model_loaded": _model is not None})
 
 
+def _unload_model_if_idle():
+    """Background loop: unload Whisper model from GPU if idle for too long."""
+    global _model, _last_used_monotonic
+    if IDLE_UNLOAD_SECONDS <= 0:
+        logger.info("WHISPER_IDLE_UNLOAD_SECONDS <= 0: idle unload disabled")
+        return
+
+    logger.info(
+        "Starting idle-unload watcher: idle=%ss, check_interval=%ss",
+        IDLE_UNLOAD_SECONDS,
+        IDLE_CHECK_INTERVAL_SECONDS,
+    )
+    while True:
+        try:
+            time.sleep(IDLE_CHECK_INTERVAL_SECONDS)
+            if _model is None:
+                continue
+
+            now = time.monotonic()
+            last = _last_used_monotonic
+            if last is None:
+                _last_used_monotonic = now
+                continue
+
+            idle_for = now - last
+            if idle_for < IDLE_UNLOAD_SECONDS:
+                continue
+
+            with _model_lock:
+                if _model is None:
+                    continue
+                if _last_used_monotonic is not None and (time.monotonic() - _last_used_monotonic) < IDLE_UNLOAD_SECONDS:
+                    continue
+
+                logger.info(
+                    "Whisper model idle for %.1fs (>= %ss). Unloading from GPU...",
+                    idle_for,
+                    IDLE_UNLOAD_SECONDS,
+                )
+                try:
+                    model_ref = _model
+                    _model = None
+                    _last_used_monotonic = None
+                    del model_ref
+                    gc.collect()
+                    _gpu_cache_clear()
+                    logger.info("Whisper model successfully unloaded due to idle timeout")
+                except Exception as e:
+                    logger.warning("Error while unloading idle Whisper model: %s", e)
+        except Exception as e:
+            logger.warning("Idle-unload watcher loop error: %s", e)
+
+
 def _preload_model():
     """Optionally load model at startup (MODEL_PRELOAD=true) to surface load errors in logs before serving."""
     if not MODEL_PRELOAD:
@@ -207,6 +280,16 @@ def _preload_model():
     get_model()
 
 
+def _start_idle_unload_thread():
+    """Start the background thread that unloads the model after idle periods."""
+    t = threading.Thread(target=_unload_model_if_idle, name="whisper-idle-unload", daemon=True)
+    t.start()
+
+
+# Start background housekeeping when the module is imported (works for Gunicorn and Flask dev server)
+_start_idle_unload_thread()
+_preload_model()
+
+
 if __name__ == "__main__":
-    _preload_model()
     app.run(host="0.0.0.0", port=9000)

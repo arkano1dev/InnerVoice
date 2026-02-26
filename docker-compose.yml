@@ -26,6 +26,8 @@ services:
       - VRAM_THRESHOLD_FREE_MB=1536
       - ROCR_VISIBLE_DEVICES=0
       - HSA_OVERRIDE_GFX_VERSION=11.0.0
+    # Mark this container as low-priority for the kernel OOM killer
+    oom_score_adj: 1000
     deploy:
       resources:
         limits:
