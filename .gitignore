@@ -5,3 +5,4 @@ venv/
 __pycache__/
 *.pyc
 GPU-TROUBLESHOOTING.md
+docs/GPU-SHARING-PLAN.md

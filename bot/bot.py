@@ -1,6 +1,7 @@
 """InnerVoice Telegram Bot - uses remote Whisper API for transcription."""
 import os
 import asyncio
+import json
 import logging
 import subprocess
 import time
@@ -50,8 +51,13 @@ audio_queue = asyncio.Queue()
 # Duplicate guard: (user_id, file_id) -> timestamp of last processing
 last_processed: Dict[Tuple[int, str], float] = {}
 
-# Pending retry: user_id -> (file_id, file_path) for Retry button
+# Pending retry: user_id -> (file_id, file_path) for Retry button (legacy; kept for callback)
 pending_retry: Dict[int, Tuple[str, str]] = {}
+
+# Queue of audios waiting for VRAM: persisted to disk so we don't lose on restart
+PENDING_QUEUE_PATH = os.path.join(AUDIO_DIR, "pending_queue.json")
+pending_list: List[Tuple] = []  # each item: (user_id, file_id, file_path, business_connection_id)
+PENDING_POLL_INTERVAL = 30  # seconds between checks for /can-transcribe
 
 # Language configuration
 SUPPORTED_LANGUAGES = {
@@ -105,7 +111,8 @@ UI_TEXTS = {
         "stats": "Stats",
         "timestamps": "Timestamps",
         "change_ui_lang": "Change bot language",
-        "busy": "⚠️ <b>Whisper is busy</b>\n\nGPU/VRAM is loaded (e.g. Ollama in use). Try again when free. Use Retry below when ready.",
+        "busy": "⚠️ <b>Whisper is busy</b>\n\nGPU/VRAM is loaded (e.g. Ollama in use).",
+        "queued": "⏳ <b>Audio saved</b>\n\nI'll transcribe it automatically when the GPU is free. No action needed.",
         "transcription_failed": "❌ <b>Transcription failed</b>\n\nSomething went wrong on the server. Please try again later.",
         "duplicate_skipped": "⏭️ Same audio already processed recently. Skipped. Send again after 1 minute to reprocess.",
     },
@@ -130,7 +137,8 @@ UI_TEXTS = {
         "stats": "Estadísticas",
         "timestamps": "Marcas de tiempo",
         "change_ui_lang": "Cambiar idioma del bot",
-        "busy": "⚠️ <b>Whisper está ocupado</b>\n\nGPU/VRAM cargada (ej. Ollama en uso). Intenta de nuevo cuando esté libre. Usa Reintentar abajo cuando estés listo.",
+        "busy": "⚠️ <b>Whisper está ocupado</b>\n\nGPU/VRAM cargada (ej. Ollama en uso).",
+        "queued": "⏳ <b>Audio guardado</b>\n\nLo transcribiré automáticamente cuando la GPU esté libre. No hace falta hacer nada.",
         "transcription_failed": "❌ <b>Transcripción fallida</b>\n\nAlgo falló en el servidor. Intenta de nuevo más tarde.",
         "duplicate_skipped": "⏭️ Mismo audio ya procesado recientemente. Omitido. Envía de nuevo tras 1 minuto para reprocesar.",
     },
@@ -160,13 +168,41 @@ def create_ui_language_keyboard() -> InlineKeyboardMarkup:
 
 
 def create_retry_keyboard(file_id: str) -> InlineKeyboardMarkup:
-    """Create Retry button for when Whisper is busy.
-
-    Telegram limits callback_data to 64 bytes. File IDs can be longer, so we
-    keep the per-user pending mapping in memory and use a short constant here.
-    """
+    """Create Retry button for when Whisper is busy (legacy; queued flow no longer uses it)."""
     keyboard = [[InlineKeyboardButton(text="🔄 Retry", callback_data="retry")]]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def load_pending_queue() -> None:
+    """Load persisted pending queue from disk (only entries whose file still exists)."""
+    global pending_list
+    pending_list = []
+    if not os.path.exists(PENDING_QUEUE_PATH):
+        return
+    try:
+        with open(PENDING_QUEUE_PATH, "r") as f:
+            raw = json.load(f)
+        for item in raw:
+            if len(item) >= 3 and Path(item[2]).exists():
+                user_id = item[0]
+                file_id = item[1]
+                file_path = item[2]
+                business_connection_id = item[3] if len(item) > 3 else None
+                pending_list.append((user_id, file_id, file_path, business_connection_id))
+    except Exception as e:
+        logging.warning("Could not load pending queue: %s", e)
+
+
+def save_pending_queue() -> None:
+    """Persist pending queue to disk (store business_connection_id as None in JSON)."""
+    try:
+        out = []
+        for t in pending_list:
+            out.append([t[0], t[1], t[2], t[3]])  # JSON allows null for None
+        with open(PENDING_QUEUE_PATH, "w") as f:
+            json.dump(out, f)
+    except Exception as e:
+        logging.warning("Could not save pending queue: %s", e)
 
 
 def create_language_keyboard() -> InlineKeyboardMarkup:
@@ -727,13 +763,19 @@ async def _call_whisper_api(
                             pass
                         raise WhisperBusyError("Service unavailable")
                     if resp.status >= 500:
-                        # Treat OOM in response body like busy so user gets retry UX
+                        # Treat GPU/VRAM busy or OOM in response body as busy so we queue and retry when free
                         try:
                             body = await resp.json()
                             err_msg = (body.get("error") or "").lower()
-                            if "out of memory" in err_msg or "outofmemoryerror" in err_msg:
+                            if (
+                                "out of memory" in err_msg
+                                or "outofmemoryerror" in err_msg
+                                or "vram" in err_msg
+                                or ("gpu" in err_msg and "busy" in err_msg)
+                                or "cannot load model" in err_msg
+                            ):
                                 raise WhisperBusyError(
-                                    body.get("message") or "GPU ran out of memory. Try again in a moment."
+                                    body.get("message") or "GPU/VRAM busy. Try again when free."
                                 )
                         except aiohttp.ContentTypeError:
                             pass
@@ -771,6 +813,7 @@ async def process_audio_async(
     wav_path = Path(file_path).with_suffix(".wav")
     prefs = user_preferences[user_id]
     progress_msg_id = None
+    queued_for_later = False  # when True, do not delete file_path in finally (pending worker will process it)
 
     try:
         duration_result = subprocess.run(
@@ -854,7 +897,7 @@ async def process_audio_async(
                     full_translation += transl_result["text"] + " "
             except WhisperBusyError:
                 gpu_busy_raised = True
-                break
+                break  # will add to pending below and skip cleanup
             except Exception as e:
                 logging.error(f"Error processing segment {i}/{len(segments)}: {e}")
             finally:
@@ -862,13 +905,17 @@ async def process_audio_async(
                     Path(segment).unlink(missing_ok=True)
 
         if gpu_busy_raised:
-            pending_retry[user_id] = (file_id, file_path)
+            pending_list.append((user_id, file_id, file_path, business_connection_id))
+            save_pending_queue()
+            if wav_path.exists():
+                wav_path.unlink(missing_ok=True)
             await send_message_safe(
                 user_id,
-                get_text(user_id, "busy"),
+                get_text(user_id, "queued"),
                 parse_mode="HTML",
-                reply_markup=create_retry_keyboard(file_id),
+                business_connection_id=business_connection_id,
             )
+            queued_for_later = True
             return
 
         elapsed_time = time.time() - start_time
@@ -940,14 +987,17 @@ async def process_audio_async(
             await send_message_safe(user_id, stats_msg, parse_mode="HTML")
 
     except WhisperBusyError:
-        # GPU busy/OOM: show retry message (may escape segment loop in edge cases)
-        pending_retry[user_id] = (file_id, file_path)
+        pending_list.append((user_id, file_id, file_path, business_connection_id))
+        save_pending_queue()
+        if wav_path.exists():
+            wav_path.unlink(missing_ok=True)
         await send_message_safe(
             user_id,
-            get_text(user_id, "busy"),
+            get_text(user_id, "queued"),
             parse_mode="HTML",
-            reply_markup=create_retry_keyboard(file_id),
+            business_connection_id=business_connection_id,
         )
+        queued_for_later = True
         return
     except Exception as e:
         logging.error(f"Error processing audio {file_id}: {e}")
@@ -957,9 +1007,10 @@ async def process_audio_async(
             parse_mode="HTML",
         )
     finally:
-        Path(file_path).unlink(missing_ok=True)
-        if wav_path.exists():
-            Path(wav_path).unlink(missing_ok=True)
+        if not queued_for_later:
+            Path(file_path).unlink(missing_ok=True)
+            if wav_path.exists():
+                wav_path.unlink(missing_ok=True)
         processing_states.pop(file_id, None)
         if file_id in progress_messages:
             del progress_messages[file_id]
@@ -984,6 +1035,41 @@ async def split_audio(wav_path: Path) -> List[Path]:
     return segments
 
 
+async def can_whisper_transcribe() -> bool:
+    """Return True if Whisper reports enough VRAM to accept a transcribe request."""
+    try:
+        url = f"{WHISPER_API_URL.rstrip('/')}/can-transcribe"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                return resp.status == 200
+    except Exception as e:
+        logging.debug("can-transcribe check failed: %s", e)
+        return False
+
+
+async def pending_worker():
+    """When VRAM is free, move one queued audio from pending_list into audio_queue for processing."""
+    while True:
+        try:
+            await asyncio.sleep(PENDING_POLL_INTERVAL)
+            if not pending_list:
+                continue
+            if not await can_whisper_transcribe():
+                continue
+            item = pending_list.pop(0)
+            save_pending_queue()
+            user_id, file_id, file_path, business_connection_id = item
+            if not Path(file_path).exists():
+                logging.warning("Pending audio file no longer exists: %s", file_path)
+                continue
+            await audio_queue.put((user_id, file_id, file_path, business_connection_id))
+            logging.info("Moved queued audio %s to main queue (VRAM free)", file_id)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logging.error("Error in pending worker: %s", e)
+
+
 async def audio_worker():
     while True:
         try:
@@ -1001,8 +1087,10 @@ async def audio_worker():
 
 
 async def main():
-    audio_worker_task = asyncio.create_task(audio_worker())
+    load_pending_queue()
     while True:
+        audio_worker_task = asyncio.create_task(audio_worker())
+        pending_worker_task = asyncio.create_task(pending_worker())
         try:
             await dp.start_polling(bot)
         except Exception as e:
@@ -1013,6 +1101,10 @@ async def main():
                 audio_worker_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await audio_worker_task
+            if not pending_worker_task.done():
+                pending_worker_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await pending_worker_task
 
 
 if __name__ == "__main__":

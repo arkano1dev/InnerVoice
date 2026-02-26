@@ -50,16 +50,22 @@ def get_model():
     if _model is not None:
         _last_used_monotonic = time.monotonic()
         return _model
-    if _model_load_error is not None:
-        raise RuntimeError(_model_load_error) from _model_load_error
 
     with _model_lock:
         # Re-check inside lock to avoid double-load
         if _model is not None:
             _last_used_monotonic = time.monotonic()
             return _model
+        # Previous load failed: only re-raise if VRAM is still not available. When VRAM is
+        # free again (e.g. Ollama unloaded), clear the error and retry loading.
         if _model_load_error is not None:
-            raise RuntimeError(_model_load_error) from _model_load_error
+            if check_vram_available():
+                logger.info("VRAM is free again; clearing previous load error and retrying.")
+                _model_load_error = None
+            else:
+                raise RuntimeError(
+                    "Cannot load model: GPU/VRAM is busy. Try again when other GPU workloads are idle."
+                ) from _model_load_error
 
         try:
             import whisper
@@ -198,9 +204,9 @@ def transcribe():
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             _gpu_cache_clear()
-            err_str = str(e)
-            # Return 503 with gpu_oom so clients can show "try again" / retry (same UX as gpu_busy)
-            if "out of memory" in err_str.lower() or "outofmemoryerror" in err_str.lower():
+            err_str = str(e).lower()
+            # Return 503 so clients can queue and retry when VRAM is free (same UX for busy and OOM)
+            if "out of memory" in err_str or "outofmemoryerror" in err_str:
                 return (
                     jsonify({
                         "error": "gpu_oom",
@@ -208,7 +214,15 @@ def transcribe():
                     }),
                     503,
                 )
-            return jsonify({"error": err_str}), 500
+            if "vram" in err_str or "gpu" in err_str and "busy" in err_str or "cannot load model" in err_str:
+                return (
+                    jsonify({
+                        "error": "gpu_busy",
+                        "message": "GPU/VRAM is busy. Try again when free.",
+                    }),
+                    503,
+                )
+            return jsonify({"error": str(e)}), 500
         finally:
             try:
                 os.unlink(tmp.name)
@@ -221,6 +235,18 @@ def transcribe():
     if return_segments and "segments" in result:
         out["segments"] = result["segments"]
     return jsonify(out)
+
+
+@app.route("/can-transcribe", methods=["GET"])
+def can_transcribe():
+    """Check if GPU has enough free VRAM to accept a transcribe request (without loading the model).
+    Bot uses this to know when to process the pending queue."""
+    if check_vram_available():
+        return jsonify({"can_transcribe": True}), 200
+    return (
+        jsonify({"can_transcribe": False, "message": "GPU/VRAM busy. Try again when free."}),
+        503,
+    )
 
 
 @app.route("/health", methods=["GET"])
