@@ -61,13 +61,23 @@ def get_model():
         if _model_load_error is not None:
             raise RuntimeError(_model_load_error) from _model_load_error
 
-        import whisper
-        logger.info("Loading Whisper model %s (first request or after idle unload)...", model_size)
         try:
+            import whisper
+            logger.info("Loading Whisper model %s (first request or after idle unload)...", model_size)
             gpu = _probe_gpu()
             if not gpu.get("available"):
                 err = gpu.get("error", "GPU not available")
                 raise RuntimeError(f"Cannot load model: {err}. Check ROCm/iGPU setup.")
+
+            # Guard against low VRAM before attempting to load the model. This uses the
+            # same threshold as the /transcribe endpoint so we fail fast and gracefully
+            # instead of triggering a HIP OOM during model.to("cuda").
+            if not check_vram_available():
+                raise RuntimeError(
+                    f"Cannot load model: GPU/VRAM is busy (free < {VRAM_THRESHOLD_FREE_MB} MiB). "
+                    "Try again when other GPU workloads are idle."
+                )
+
             _model = whisper.load_model(model_size, device="cuda")
             if USE_TORCH_COMPILE:
                 try:
@@ -80,24 +90,22 @@ def get_model():
             _last_used_monotonic = time.monotonic()
         except Exception as e:
             _model_load_error = e
+            # Best-effort cache clear in case we partially allocated before failing
+            try:
+                _gpu_cache_clear()
+            except Exception:
+                pass
             logger.exception("Failed to load Whisper model: %s", e)
             raise
     return _model
 
 
 def get_vram_stats():
-    """Get VRAM usage. Returns (used_mb, total_mb) or (None, None)."""
-    # Try PyTorch first (works with ROCm via HIP)
-    try:
-        import torch
-        if torch.cuda.is_available():
-            used = torch.cuda.memory_allocated() // (1024 * 1024)
-            total = torch.cuda.get_device_properties(0).total_memory // (1024 * 1024)
-            return int(used), int(total)
-    except Exception as e:
-        logger.debug(f"PyTorch VRAM check: {e}")
+    """Get VRAM usage. Returns (used_mb, total_mb) or (None, None).
 
-    # Fallback: rocm-smi
+    Prefer rocm-smi so we see VRAM usage from *all* processes, not just this one.
+    """
+    # First try rocm-smi (global VRAM across processes)
     try:
         result = subprocess.run(
             ["rocm-smi", "--showmemuse"],
@@ -116,6 +124,17 @@ def get_vram_stats():
                     return used, total
     except Exception as e:
         logger.debug(f"rocm-smi VRAM check: {e}")
+
+    # Fallback: PyTorch (only sees this process)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            used = torch.cuda.memory_allocated() // (1024 * 1024)
+            total = torch.cuda.get_device_properties(0).total_memory // (1024 * 1024)
+            return int(used), int(total)
+    except Exception as e:
+        logger.debug(f"PyTorch VRAM check: {e}")
+
     return None, None
 
 
@@ -179,7 +198,17 @@ def transcribe():
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             _gpu_cache_clear()
-            return jsonify({"error": str(e)}), 500
+            err_str = str(e)
+            # Return 503 with gpu_oom so clients can show "try again" / retry (same UX as gpu_busy)
+            if "out of memory" in err_str.lower() or "outofmemoryerror" in err_str.lower():
+                return (
+                    jsonify({
+                        "error": "gpu_oom",
+                        "message": "GPU ran out of memory. Try again in a moment.",
+                    }),
+                    503,
+                )
+            return jsonify({"error": err_str}), 500
         finally:
             try:
                 os.unlink(tmp.name)

@@ -106,6 +106,7 @@ UI_TEXTS = {
         "timestamps": "Timestamps",
         "change_ui_lang": "Change bot language",
         "busy": "⚠️ <b>Whisper is busy</b>\n\nGPU/VRAM is loaded (e.g. Ollama in use). Try again when free. Use Retry below when ready.",
+        "transcription_failed": "❌ <b>Transcription failed</b>\n\nSomething went wrong on the server. Please try again later.",
         "duplicate_skipped": "⏭️ Same audio already processed recently. Skipped. Send again after 1 minute to reprocess.",
     },
     "es": {
@@ -130,6 +131,7 @@ UI_TEXTS = {
         "timestamps": "Marcas de tiempo",
         "change_ui_lang": "Cambiar idioma del bot",
         "busy": "⚠️ <b>Whisper está ocupado</b>\n\nGPU/VRAM cargada (ej. Ollama en uso). Intenta de nuevo cuando esté libre. Usa Reintentar abajo cuando estés listo.",
+        "transcription_failed": "❌ <b>Transcripción fallida</b>\n\nAlgo falló en el servidor. Intenta de nuevo más tarde.",
         "duplicate_skipped": "⏭️ Mismo audio ya procesado recientemente. Omitido. Envía de nuevo tras 1 minuto para reprocesar.",
     },
 }
@@ -714,12 +716,23 @@ async def _call_whisper_api(
                     if resp.status == 503:
                         try:
                             body = await resp.json()
-                            if body.get("error") == "gpu_busy":
+                            err = body.get("error")
+                            if err in ("gpu_busy", "gpu_oom"):
                                 raise WhisperBusyError(body.get("message", "GPU busy"))
                         except aiohttp.ContentTypeError:
                             pass
                         raise WhisperBusyError("Service unavailable")
                     if resp.status >= 500:
+                        # Treat OOM in response body like busy so user gets retry UX
+                        try:
+                            body = await resp.json()
+                            err_msg = (body.get("error") or "").lower()
+                            if "out of memory" in err_msg or "outofmemoryerror" in err_msg:
+                                raise WhisperBusyError(
+                                    body.get("message") or "GPU ran out of memory. Try again in a moment."
+                                )
+                        except aiohttp.ContentTypeError:
+                            pass
                         last_error = RuntimeError(f"Whisper HTTP {resp.status}")
                         if attempt < WHISPER_RETRIES:
                             await asyncio.sleep(3 * (attempt + 1))
@@ -922,9 +935,23 @@ async def process_audio_async(
                 stats_msg += f"\n🖥️ GPU: {health['vram_used_mb']} / {health['vram_total_mb']} MB VRAM"
             await send_message_safe(user_id, stats_msg, parse_mode="HTML")
 
+    except WhisperBusyError:
+        # GPU busy/OOM: show retry message (may escape segment loop in edge cases)
+        pending_retry[user_id] = (file_id, file_path)
+        await send_message_safe(
+            user_id,
+            get_text(user_id, "busy"),
+            parse_mode="HTML",
+            reply_markup=create_retry_keyboard(file_id),
+        )
+        return
     except Exception as e:
         logging.error(f"Error processing audio {file_id}: {e}")
-        await send_message_safe(user_id, f"❌ Error: {str(e)}")
+        await send_message_safe(
+            user_id,
+            get_text(user_id, "transcription_failed"),
+            parse_mode="HTML",
+        )
     finally:
         Path(file_path).unlink(missing_ok=True)
         if wav_path.exists():
