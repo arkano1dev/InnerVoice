@@ -195,6 +195,22 @@ Disable external fallback in the actual agent. The adapter opens its input read-
 
 ## Desktop role
 
+### Run the desktop client in Docker
+
+On the machine with the keyboard and microphone, open a terminal in your local X11 session. Use Docker Engine with Compose and a PulseAudio or PipeWire-Pulse session. The container uses the session's X11 cookie and audio socket. It captures locally, opens the editor and sends the audio over HTTPS to the server for inference. Use **Copy** in the editor to paste the returned text into another app.
+
+On the Gateway server, register a client with `./bin/innervoice credential --identity desktop-hotkey`, allow the workstation's source IP, and enable API jobs. On the workstation, put the public trust certificate in `~/.config/innervoice-desktop/ca.crt` and the matching bearer token in `~/.config/innervoice-desktop/bearer` with file mode `0600`. Then run these commands from the workstation's checkout:
+
+```bash
+./bin/innervoice-desktop setup
+./bin/innervoice-desktop start
+./bin/innervoice-desktop status
+```
+
+At setup, enter the Gateway HTTPS URL. Press Enter to accept the discovered certificate and bearer files, the default microphone and the default **Ctrl+Alt+V** hotkey. Press the hotkey once to record and again to finish. Use `./bin/innervoice-desktop logs` for container diagnostics and `./bin/innervoice-desktop stop` to stop it. Settings and saved recordings remain in the workstation's user directories across container restarts.
+
+### Run directly on Ubuntu
+
 On a graphical Ubuntu workstation install Python, Tk, PortAudio, the AT-SPI Python bindings, a microphone, and an X11 session supporting global shortcuts. The server and bot are independent. Run as the logged-in user:
 
 ```bash

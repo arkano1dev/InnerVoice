@@ -30,7 +30,13 @@ def check_gateway(cfg):
 
 def setup():
     cfg=json.loads(CONFIG.read_bytes()) if CONFIG.exists() else {}
-    for key,default in dict(url="",ca="",token_file="",source_ip="",source_port=0,
+    ca = CONFIG.with_name("ca.crt")
+    bearer = CONFIG.with_name("bearer")
+    for key, path in (("ca", ca), ("token_file", bearer)):
+        if not Path(cfg.get(key) or ".").is_file() and path.is_file():
+            cfg[key] = str(path)
+    for key,default in dict(url="",ca=str(ca) if ca.is_file() else "",
+                            token_file=str(bearer) if bearer.is_file() else "",source_ip="",source_port=0,
                             hotkey="<ctrl>+<alt>+v",microphone="").items():
         value=input(f"{key} [{cfg.get(key,default)}]: ").strip()
         cfg[key]=value or cfg.get(key,default)

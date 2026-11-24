@@ -1,0 +1,43 @@
+services:
+  desktop:
+    build:
+      context: ./clients
+      dockerfile: Dockerfile.desktop
+    user: "${IV_DESKTOP_UID:?}:${IV_DESKTOP_GID:?}"
+    hostname: "${IV_DESKTOP_HOSTNAME:?}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    environment:
+      DISPLAY: "${DISPLAY:?}"
+      XAUTHORITY: /run/innervoice/Xauthority
+      PULSE_SERVER: unix:/run/innervoice/pulse/native
+    volumes:
+      - type: bind
+        source: /tmp/.X11-unix
+        target: /tmp/.X11-unix
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${IV_DESKTOP_XAUTHORITY:?}"
+        target: /run/innervoice/Xauthority
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${IV_DESKTOP_PULSE:?}"
+        target: /run/innervoice/pulse
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${IV_DESKTOP_CONFIG:?}"
+        target: /home/innervoice/.config/innervoice-desktop
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${IV_DESKTOP_STATE:?}"
+        target: /home/innervoice/.local/state/innervoice-desktop
+        bind:
+          create_host_path: false

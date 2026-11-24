@@ -1,0 +1,16 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libasound2-plugins libportaudio2 python3-tk python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv --system-site-packages /opt/innervoice \
+    && /opt/innervoice/bin/python -m pip install --no-cache-dir \
+       requests sounddevice pynput pystray Pillow
+RUN printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf
+
+ENV HOME=/home/innervoice PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY desktop.py provider.py ./
+ENTRYPOINT ["/opt/innervoice/bin/python", "/app/desktop.py"]
+CMD ["run"]
