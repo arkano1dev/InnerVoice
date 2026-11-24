@@ -9,13 +9,33 @@ InnerVoice is a Telegram bot that transcribes and translates voice messages usin
 - **[DOCUMENTATION.md](DOCUMENTATION.md)** - Complete user & technical guide
 - **[CHANGELOG.md](CHANGELOG.md)** - Version history and changes
 
+## Private Voice Gateway candidate
+
+The private Gateway, operator CLI, speech provider and Ubuntu recorder are available on `refactor/private-voice-gateway`. Target-host acceptance is pending. The legacy bot instructions below describe the original deployment.
+
+Run `./bin/innervoice` from the candidate checkout with one of these commands.
+
+| Command | Purpose |
+| --- | --- |
+| `initialize`, `config setup`, `config edit` | Prepare or edit deployment settings. Follow the provisioning guide before starting services. |
+| `config show`, `config validate` | Inspect redacted settings or validate the saved configuration. |
+| `config set KEY=VALUE` | Save a configuration change for the next activation. |
+| `credential --identity LABEL` | Register or rotate a client token using a masked prompt. |
+| `start`, `start --setup` | Activate a prepared deployment, optionally running setup first. |
+| `restart --engine ENGINE` | Drain work and activate a configured openai-whisper or faster-whisper profile. |
+| `stop`, `status` | Drain and stop the active services, or inspect service and configuration status. |
+| `dashboard [--watch] [--job ID]` | Inspect job metadata once, continuously, or for one job. |
+| `desktop setup`, `desktop start`, `desktop status`, `desktop stop` | Configure the recorder, launch it in an X11 session, inspect its user service, or stop it. |
+
+The Gateway accepts authenticated audio jobs, tracks progress, supports retries with an idempotency key and serves recoverable recording sessions. The agent provider converts an incoming voice note to text for the agent. The desktop client records audio and retains local state for recovery. See the [operator guide](docs/private-gateway.md) for provisioning, client installation, direct smoke checks, benchmark criteria and rollback.
+
 ## Quick Start
 
 Run all commands from the **project root** (directory that contains `docker-compose.yml`).
 
 ```bash
 # Clone and go to project root
-git clone <repo-url> InnerVoice && cd InnerVoice
+git clone https://github.com/arkano1dev/InnerVoice.git && cd InnerVoice
 
 # Configure your bot token in .env
 echo "BOT_TOKEN=your_token_here" > .env
@@ -90,10 +110,8 @@ sudo apt install ffmpeg
 
 ### 1. Clone the Repository
 
-Set `INNERVOICE_REPOSITORY_URL` to the HTTPS clone URL shown by the repository host. For the private Voice Gateway and desktop client, follow the [operator runbook](docs/private-gateway.md).
-
 ```bash
-git clone "$INNERVOICE_REPOSITORY_URL" InnerVoice
+git clone https://github.com/arkano1dev/InnerVoice.git
 cd InnerVoice
 ```
 
