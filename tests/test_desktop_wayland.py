@@ -157,6 +157,45 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertIn(override, host.splitlines())
             self.assertEqual(host.splitlines()[-3:], ["ps", "-a", "desktop"])
 
+    def test_audio_quota_preserves_existing_and_partial_takes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / "audio-limit-mib").write_text("1")
+            old = home / "old"
+            old.mkdir()
+            existing = old / "000.raw"
+            existing.write_bytes(bytes(1024 ** 2 - 4))
+            current = home / "new"
+            current.mkdir()
+            device = MagicMock()
+            mic = device.RawInputStream.return_value.__enter__.return_value
+            mic.read.return_value = (b"1234", False)
+            events = queue.Queue()
+            with patch.dict(sys.modules, sounddevice=device):
+                desktop.capture(current, threading.Event(), events, "", threading.Event())
+            mic.read.assert_called_once_with(2)
+            self.assertEqual((current / "000.raw").read_bytes(), b"1234")
+            self.assertEqual(existing.stat().st_size, 1024 ** 2 - 4)
+            self.assertIn("audio limit", dict(events.queue)["capture_error"])
+
+    def test_storage_cleanup_preview_and_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / ".local/state/innervoice-desktop"
+            home.mkdir(parents=True)
+            for i in range(4):
+                folder = home / str(i)
+                folder.mkdir()
+                (folder / "editor.json").write_text(json.dumps({"created":i, "ready":i != 1}))
+                (folder / "000.raw").write_bytes(b"00")
+            args = [ROOT / "bin/innervoice-desktop", "storage", "clean", "--keep", "2"]
+            env = dict(os.environ, HOME=tmp)
+            preview = subprocess.check_output(args, env=env, text=True)
+            self.assertIn(str(home / "0"), preview)
+            self.assertEqual(len(list(home.glob("*/*.raw"))), 4)
+            subprocess.check_output([*args, "--apply"], env=env)
+            self.assertEqual({p.parent.name for p in home.glob("*/*.raw")}, {"1", "2", "3"})
+            self.assertEqual(len(list(home.glob("*/editor.json"))), 4)
+
     def test_pause_preview_and_resume_preserve_samples(self):
         stop, pause = threading.Event(), threading.Event()
         events = queue.Queue()
@@ -205,6 +244,12 @@ class WaylandDesktopTests(unittest.TestCase):
             metadata.write_text('{"text":"Previous take","applied":1,"ready":true}')
             os.utime(metadata, (1, 1))
             (archived / "000.raw").write_bytes(b"\x01\x00" * 8)
+            (home / "current").write_text("previous")
+            for i in range(10):
+                older = home / f"older-{i}"
+                older.mkdir()
+                (older / "editor.json").write_text('{"created":0,"ready":true}')
+                (older / "000.raw").write_bytes(b"00")
             runtime = home / "runtime"
             runtime.mkdir(mode=0o700)
 
@@ -237,7 +282,8 @@ class WaylandDesktopTests(unittest.TestCase):
                 for widget in app.topLevelWidgets():
                     editor = widget.findChild(QtWidgets.QTextEdit)
                     if editor is not None and "startup" not in observed:
-                        observed["startup"] = widget.isVisible()
+                        observed["startup"] = (widget.isVisible() and not editor.toPlainText()
+                                               and editor.placeholderText() == "Ready when you are")
                         observed["ordinary"] = (
                             widget.windowType() == QtCore.Qt.Window
                             and not widget.windowFlags() & QtCore.Qt.WindowStaysOnTopHint
@@ -263,6 +309,7 @@ class WaylandDesktopTests(unittest.TestCase):
                         history = next(b.menu() for b in widget.findChildren(QtWidgets.QPushButton)
                                        if b.accessibleName() == "Local recording history")
                         history.aboutToShow.emit()
+                        observed["count"] = len(history.actions())
                         previous = next((a for a in history.actions() if "Previous take" in a.text()), None)
                         if previous:
                             previous.trigger()
@@ -297,6 +344,7 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertEqual(observed.get("clipboard"), "Edited note")
             self.assertEqual(observed.get("history"), "Previous take")
             self.assertTrue(observed.get("playable"))
+            self.assertEqual(observed["count"], 10)
             saved = attempts[-1]
             self.assertTrue((saved / "000.raw").is_file())
             record = json.loads((saved / "editor.json").read_text())

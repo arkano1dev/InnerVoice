@@ -238,9 +238,20 @@ Enter the Gateway's full HTTPS URL and accept the suggested certificate path. Pa
 
 Press the shortcut once to record and again to stop. Existing shortcuts keep their binding until you change it in Settings. Check for conflicts in your compositor. Run `./bin/innervoice-desktop show` and click **Record** to test before assigning a shortcut. Use `./bin/innervoice-desktop status`, `logs` or `stop` to manage the client. Settings and saved recordings survive container restarts.
 
-**Recorder pill.** Click the microphone or use the shortcut to record. Pause releases the microphone. Play lets you listen to the saved take while paused. Stop playback (or let it finish), then use the resume microphone to append to the same take. The square finishes the recording. The editor grows for longer transcripts, then scrolls. A new take starts compact. Drag the status area or the rim to move the pill. It requests a bottom-center position where supported; Wayland compositors control initial placement. Switch apps normally and return with the app switcher. Copy uses the current edited text.
+**Recorder pill.** Click the microphone or use the shortcut to record. Pause releases the microphone. Play lets you listen to the saved take while paused. Stop playback (or let it finish), then use the resume microphone to append to the same take. The square finishes the recording. The pill starts with “Ready when you are”. Select an earlier take explicitly to review or retry it. The editor grows toward the usable height of the current monitor before scrolling. A new take starts compact. Drag the status area or the rim to move the pill. It requests a bottom-center position where supported; Wayland compositors control initial placement. Switch apps normally and return with the app switcher. Copy uses the current edited text.
 
-**Local history.** The clock opens previous recordings and transcripts. Select an entry to review, play or retry transcription. Audio is written in small batches to the desktop state directory during capture, independently of the Gateway. The existing limit is 60 minutes of captured audio per take. Stop the client before managing files manually. To archive a take, copy its entire directory from `~/.local/state/innervoice-desktop/`. The numbered files are consecutive signed 16-bit mono PCM, 16 kHz. Older versions may have already removed audio for completed transcripts.
+**Local history.** The clock lists the ten most recent recordings with locally available audio, ordered by capture date. Select an entry to review, play or retry transcription. Audio is written in small batches to the desktop state directory during capture, independently of the Gateway. The existing limit is 60 minutes of captured audio per take. Stop the client before managing files manually. To archive a take, copy its entire directory from `~/.local/state/innervoice-desktop/`. The numbered files are consecutive signed 16-bit mono PCM, 16 kHz. Older versions may have already removed audio for completed transcripts.
+
+**Storage controls.** Run `./bin/innervoice-desktop storage` on the workstation to see the host folder, audio usage and limit. The default audio budget is 2048 MiB. At the limit the recorder stops capture and retains the samples already written. Existing files are retained even if the limit is lowered below usage. Stop the recorder before changing the limit or cleaning. The following commands show a 4096 MiB budget and an optional cleanup:
+
+```bash
+./bin/innervoice-desktop storage limit 4096
+./bin/innervoice-desktop storage clean --keep 10
+./bin/innervoice-desktop storage clean --keep 10 --apply
+```
+
+The preview lists eligible folders. Applying removes only numbered audio fragments from completed takes outside the newest ten audio recordings. Transcripts and pending takes are retained. The menu limit itself never deletes audio.
+
 
 For acceptance, with another Wayland app focused, record a five-second note with the shortcut and stop it with the same shortcut. Verify that text appears in the editor and can be copied into the other app. Repeat on your normal microphone and private network. Run the lightweight regression tests with `python3 -m unittest discover -s tests -v` from the checkout when `requests` is installed.
 

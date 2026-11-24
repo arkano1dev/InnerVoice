@@ -19,6 +19,7 @@ import wave
 
 import requests
 
+from recording_storage import audio_bytes, limit_bytes, recordings
 from provider import Client, atomic, gateway_url, read_bearer
 
 HOME=Path.home()/".local/state/innervoice-desktop"
@@ -183,6 +184,9 @@ def capture(directory, stop, events, device, pause):
     from array import array
     try:
         import sounddevice as sd
+        remaining = limit_bytes(directory.parent) - audio_bytes(directory.parent)
+        if remaining < 2:
+            raise ValueError("Local audio limit reached. Manage space with the storage command.")
         index = 0
         while not stop.is_set() and index < 120:
             with sd.RawInputStream(samplerate=16000, channels=1, dtype="int16", device=device or None) as mic:
@@ -197,8 +201,12 @@ def capture(directory, stop, events, device, pause):
                             finally:
                                 os.close(directory_fd)
                         while out.tell() < BLOCK and not stop.is_set() and not pause.is_set():
-                            audio, overflow = mic.read(min(4000, (BLOCK - out.tell()) // 2))
+                            frames = min(4000, (BLOCK - out.tell()) // 2, remaining // 2)
+                            if frames <= 0:
+                                raise ValueError("Local audio limit reached. Manage space with the storage command.")
+                            audio, overflow = mic.read(frames)
                             out.write(bytes(audio))
+                            remaining -= len(audio)
                             out.flush()
                             os.fsync(out.fileno())
                             if overflow:
@@ -381,10 +389,15 @@ def graphical(listener):
     root.setAttribute(Qt.WA_TranslucentBackground)
     root.setWindowTitle("InnerVoice")
     root.setStyleSheet("""
-        QWidget#pill {background:rgba(22,22,25,239);border:1px solid #47474e;border-radius:26px}
+        QWidget#pill {background:rgba(22,22,25,226);border:1px solid #47474e;border-radius:26px}
         QLabel {color:#bfbfc7;font-size:12px;background:transparent}
         QTextEdit {background:transparent;color:#e3e3e7;border:0;padding:0;font-size:15px;
                    selection-background-color:#535065}
+        QScrollBar:vertical {background:transparent;width:8px;margin:2px 0}
+        QScrollBar::handle:vertical {background:#73737e;border-radius:3px;min-height:25px;margin:0 1px}
+        QScrollBar::handle:vertical:hover {background:#a2a2ad}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {height:0}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {background:transparent}
         QPushButton {border:1px solid transparent;border-radius:15px;background:transparent}
         QPushButton:hover, QPushButton:focus {background:#393940;border-color:#64646d}
         QPushButton#record {background:#35353d;border-color:#54545e}
@@ -409,7 +422,8 @@ def graphical(listener):
     editor = QTextEdit()
     editor.setAcceptRichText(False)
     editor.setAccessibleName("Transcript")
-    editor.setPlaceholderText("Record a thought…")
+    editor.setPlaceholderText("Ready when you are")
+    editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     palette = editor.palette()
     palette.setColor(QPalette.PlaceholderText, QColor("#aaaab4"))
     editor.setPalette(palette)
@@ -417,15 +431,23 @@ def graphical(listener):
     editor.setFixedHeight(24)
     body.addWidget(editor)
 
-    def fit_text():
+    def fit_text(*_):
         height = int(editor.document().size().height()) + 3
-        editor.setFixedHeight(max(24, min(height, 150)))
-    editor.document().documentLayout().documentSizeChanged.connect(lambda _: fit_text())
+        screen = root.screen() or app.primaryScreen()
+        available = screen.availableGeometry().height()
+        controls = max(32, buttons.sizeHint().height())
+        ceiling = max(24, available - controls - 16 - 2 - 48)
+        editor.setFixedHeight(max(24, min(height, ceiling)))
+        policy = Qt.ScrollBarAsNeeded if height > ceiling else Qt.ScrollBarAlwaysOff
+        if editor.verticalScrollBarPolicy() != policy:
+            editor.setVerticalScrollBarPolicy(policy)
+
     outer.setSizeConstraint(QVBoxLayout.SetFixedSize)
     buttons = QHBoxLayout()
     buttons.setSpacing(2)
     body.addLayout(buttons)
-    status = QLabel("Ready")
+    status = QLabel("")
+    status.setAlignment(Qt.AlignCenter)
     status.setWordWrap(True)
     status.setMinimumWidth(55)
     elapsed = QLabel()
@@ -780,30 +802,22 @@ def graphical(listener):
         if working or transfer_active or playback is not None:
             recovery.addAction("Finish the current operation to open history").setEnabled(False)
             return
-        for saved in sorted(HOME.glob("*/editor.json"), key=lambda f: f.parent.stat().st_mtime, reverse=True):
-            entry = json.loads(saved.read_bytes())
-            created = entry.get("created", saved.stat().st_mtime)
-            duration = sum(p.stat().st_size for p in saved.parent.glob("*.raw")) // 32000
+        count = 0
+        for created, saved, entry in recordings(HOME):
+            size = sum(p.stat().st_size for p in saved.parent.glob("*.raw"))
+            if size < 2:
+                continue
+            duration = size // 32000
+            count += 1
             stamp = time.strftime("%b %d, %H:%M", time.localtime(created))
             preview = " ".join(entry.get("text", "").split())[:36].replace("&", "&&")
             label = f"{stamp}   {duration // 60}:{duration % 60:02}   {preview}"
             recovery.addAction(label, lambda checked=False, file=saved: recover(file))
+            if count == 10:
+                break
         if not recovery.actions():
             recovery.addAction("No saved recordings").setEnabled(False)
     recovery.aboutToShow.connect(list_recoverable)
-    if pointer.exists() and (HOME / pointer.read_text() / "editor.json").is_file():
-        directory=HOME/pointer.read_text()
-        state=json.loads((directory/"editor.json").read_bytes())
-        editor.setPlainText(state.get("text", ""))
-        play_button.setVisible(audio_available())
-        if state.get("intent")=="pending":
-            status.setText("Insertion outcome unknown. Check the destination.")
-        elif not state["ready"]:
-            replace_session = state.get("replace_session", False)
-            stop.set()
-            finished.set()
-            status.setText("Recovering saved recording")
-            retry()
     menu.addAction("Record / Stop", toggle)
     menu.addAction("Show editor", reveal)
     tray.activated.connect(lambda reason: reveal() if reason == QSystemTrayIcon.Trigger else None)
@@ -822,12 +836,27 @@ def graphical(listener):
         notifier.activated.connect(lambda _: (read_shortcuts(listener, events), poll()))
     else:
         timer.timeout.connect(lambda: read_shortcuts(listener, events))
+    editor.document().documentLayout().documentSizeChanged.connect(lambda _: fit_text())
     root.adjustSize()
     screen = app.screenAt(QCursor.pos()) or app.primaryScreen()
     if screen:
         area = screen.availableGeometry()
         root.move(area.center().x() - root.width() // 2, area.bottom() - root.height() - 24)
     root.show()
+    watched_screen = root.screen()
+
+    def screen_changed(screen):
+        nonlocal watched_screen
+        if watched_screen is not None:
+            watched_screen.availableGeometryChanged.disconnect(fit_text)
+        watched_screen = screen
+        if screen is not None:
+            screen.availableGeometryChanged.connect(fit_text)
+            fit_text()
+
+    watched_screen.availableGeometryChanged.connect(fit_text)
+    root.windowHandle().screenChanged.connect(screen_changed)
+    fit_text()
     try:
         app.exec_()
     finally:

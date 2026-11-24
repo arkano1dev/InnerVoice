@@ -13,6 +13,7 @@ InnerVoice desktop
   show        Open the editor without starting the microphone.
   shortcut    Print the command for your global keyboard shortcut.
   check       Test TLS and authentication from the running container.
+  storage     Show usage, configure the audio limit or clean older completed audio.
   status      Show the container state.
   logs        Follow recent client diagnostics.
   stop        Turn off the recorder and indicator.
@@ -20,10 +21,14 @@ HELP
     exit
 fi
 case "$action" in
-    setup|start|power|toggle|show|shortcut|check|status|logs|stop) ;;
-    *) echo "Usage: $0 setup|start|power|toggle|show|shortcut|check|status|logs|stop" >&2; exit 2 ;;
+    setup|start|power|toggle|show|shortcut|check|storage|status|logs|stop) ;;
+    *) echo "Usage: $0 setup|start|power|toggle|show|shortcut|check|storage|status|logs|stop" >&2; exit 2 ;;
 esac
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ "$action" == storage ]]; then
+    shift
+    exec python3 "$repo_dir/clients/recording_storage.py" "$@"
+fi
 if [[ "$action" == shortcut ]]; then
     printf '"%s/bin/innervoice-desktop" toggle\n' "$repo_dir"
     exit
