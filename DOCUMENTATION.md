@@ -93,7 +93,7 @@ make logs-whisper
 
 - `security_opt: seccomp=unconfined`, `cap_add: SYS_PTRACE`, `ipc: host`, `shm_size: 8g`
 - `devices: /dev/kfd`, `/dev/dri`, `group_add: video`, `group_add: render`
-- `ROCR_VISIBLE_DEVICES=0`, `HSA_OVERRIDE_GFX_VERSION` (optional operator-supplied compatibility override)
+- `ROCR_VISIBLE_DEVICES=0`, `HSA_OVERRIDE_GFX_VERSION` (optional operator-supplied override)
 - `WHISPER_MODEL=medium`, `VRAM_THRESHOLD_FREE_MB=1536` (compose default; use `tiny` or `small` if you have less VRAM)
 
 **Host requirements:** AMD GPU with ROCm support, `/dev/kfd` and `/dev/dri` available, user in `video` and `render` groups.
@@ -993,8 +993,14 @@ Each message limited to 4096 characters (Telegram limit)
 ## Support & Contact
 
 **Issues or Questions?**
+- Contact: @arkano21 on Telegram
 - Check logs: `docker compose logs bot`
 - Review this documentation
+
+**Support Development**:
+- ₿ Bitcoin: `bc1qwktevffc57rkk8lwyd6yqwxrvcd4vjxggcpsrn`
+- ⚡ Lightning: `buffswan6@primal.net`
+- 💜 Nostr: `npub1p2x3t3njq44vsk24qjkauzurvfd59c224qyu2mpgu9jverk9tfrqnz0ql5`
 
 ---
 
@@ -1016,4 +1022,5 @@ Each message limited to 4096 characters (Telegram limit)
 **Version**: 2.1.0  
 **Last Updated**: November 14, 2025  
 **Status**: Production Ready ✅  
+**Made with ❤️ by @arkano21**
 
