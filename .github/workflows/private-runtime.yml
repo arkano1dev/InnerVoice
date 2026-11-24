@@ -15,7 +15,8 @@ jobs:
       - name: Test the private stack with synthetic audio
         run: |
           sudo swapoff -a
-          command -v nft >/dev/null || sudo apt-get install -y nftables
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nftables weston pulseaudio pulseaudio-utils
           python3 deploy/egress-policy --gateway 192.0.2.1 --port 9443 | sudo nft -f -
           python3 deploy/egress-policy | sudo nft -f -
           curl -fsSL --retry 3 https://github.com/anchore/grype/releases/download/v0.122.1/grype_0.122.1_linux_amd64.tar.gz -o "$RUNNER_TEMP/grype.tar.gz"

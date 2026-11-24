@@ -1,7 +1,7 @@
 FROM cgr.dev/chainguard/wolfi-base AS runtime
 RUN apk add --no-cache ca-certificates python-3.13 portaudio libpulse libglvnd \
     libxkbcommon wayland-libs-client wayland-libs-cursor wayland-libs-egl \
-    libfontconfig1 fontconfig-config glib libstdc++
+    libfontconfig1 fontconfig-config ttf-dejavu glib libstdc++
 ENV PATH=/opt/innervoice/bin:$PATH IV_DESKTOP_QT=6 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 
