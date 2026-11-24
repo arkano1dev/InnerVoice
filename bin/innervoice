@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import ssl
 import shutil
 import sqlite3
@@ -27,6 +28,7 @@ HOME = Path(os.environ.get("INNERVOICE_CONFIG_DIR", Path.home()/".config/innervo
 FILE = HOME/"deployment.toml"
 ACTIVE = HOME/"active.toml"
 ENGINES = ("openai-whisper","faster-whisper")
+MODELS = ("tiny", "base", "small", "medium", "large", "large-v1", "large-v2", "large-v3")
 PRIVATE_NETWORKS = tuple(ipaddress.IPv4Network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 DEFAULT = {"deployment":{"version":1,"engine":ENGINES[0],"bind":"","allowed_networks":"","port":9000,"enable":False,
                          "data":str(HOME/"state"),"secrets":str(HOME/"secrets")},
@@ -65,14 +67,10 @@ def read(path):
 
 def validate(cfg):
     d=cfg["deployment"]
-    ip=ipaddress.IPv4Address(d["bind"])
-    if not any(ip in network for network in PRIVATE_NETWORKS):
-        raise ValueError("Choose a private VLAN IPv4 address")
+    private_address(d["bind"])
     if not 1<=d["port"]<=65535 or d["engine"] not in ENGINES or d["version"]!=1:
         raise ValueError("Invalid deployment settings")
-    networks = [ipaddress.IPv4Network(part.strip()) for part in d["allowed_networks"].split(",") if part.strip()]
-    if not networks or any(not any(network.subnet_of(private) for private in PRIVATE_NETWORKS) for network in networks):
-        raise ValueError("Specify allowed private client addresses or CIDRs")
+    client_networks(d["allowed_networks"])
     for section,values in DEFAULT.items():
         for key,default in values.items():
             if type(cfg[section][key]) is not type(default):
@@ -86,7 +84,7 @@ def validate(cfg):
             raise ValueError("Use absolute data and secret directories")
     for engine in ENGINES:
         profile=cfg[engine]
-        if profile["model"] not in ("tiny","base","small","medium","large","large-v1","large-v2","large-v3"):
+        if profile["model"] not in MODELS:
             raise ValueError("Select multilingual translation weights")
     b=cfg["bot.defaults"]
     if b["ui_language"] not in ("en","es") or b["language"] not in "es en fr nl pt it ja zh".split() or b["mode"] not in ("fast","full"):
@@ -101,7 +99,15 @@ def set_value(cfg,field,raw):
     cfg[section][key]=raw.lower()=="true" if type(old) is bool else type(old)(raw)
 
 
-def setup(cfg):
+def save_config(cfg):
+    if FILE.exists():
+        if read(FILE) == cfg:
+            return
+        atomic(HOME/"previous.toml", FILE.read_bytes())
+    atomic(FILE, serialize(cfg))
+
+
+def edit_config(cfg):
     for section,fields in cfg.items():
         for key,value in fields.items():
             if key in ("version","engine"):
@@ -112,9 +118,205 @@ def setup(cfg):
     validate(cfg)
     if input("Save settings [y/N]? ").lower()!="y":
         raise SystemExit("Cancelled")
-    if FILE.exists():
-        atomic(HOME/"previous.toml",FILE.read_bytes())
-    atomic(FILE,serialize(cfg))
+    save_config(cfg)
+
+
+def private_address(value):
+    address = ipaddress.IPv4Address(value)
+    if not any(address in network for network in PRIVATE_NETWORKS):
+        raise ValueError("Enter a private LAN or VLAN IPv4 address.")
+    return str(address)
+
+
+def client_networks(value):
+    networks = [ipaddress.IPv4Network(part.strip()) for part in value.split(",") if part.strip()]
+    if not networks or any(not any(network.subnet_of(private) for private in PRIVATE_NETWORKS) for network in networks):
+        raise ValueError("Enter private client IPv4 addresses or CIDRs, separated by commas.")
+    return ",".join(str(network) for network in dict.fromkeys(networks))
+
+
+def listen_port(value):
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise ValueError("Enter a port from 1 to 65535.")
+    return port
+
+
+def prompt(label, default, parse):
+    suffix = f" [{default}]" if default else ""
+    while True:
+        value = input(f"  {label}{suffix}: ").strip() or default
+        try:
+            return parse(value)
+        except (ValueError, OSError) as error:
+            print(f"  {error}")
+
+
+def local_image_id(image):
+    result = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        capture_output=True, text=True,
+    )
+    image_id = result.stdout.strip()
+    if result.returncode or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise ValueError(f"Docker could not inspect {image!r}. Check the image tag, Docker service and permissions.")
+    return image_id
+
+
+def select_image(image):
+    if not image:
+        raise ValueError("Enter a local Docker image tag or digest.")
+    return image, local_image_id(image)
+
+
+def select_model(value):
+    if value not in MODELS:
+        raise ValueError("Choose a multilingual model: " + ", ".join(MODELS))
+    return value
+
+
+def select_weights(value, engine):
+    if not value:
+        raise ValueError("Enter the path to your existing model weights.")
+    path = Path(value).expanduser().resolve()
+    if engine == "openai-whisper" and not path.is_file():
+        raise ValueError("Choose a readable Whisper .pt checkpoint file.")
+    if engine == "faster-whisper" and not path.is_dir():
+        raise ValueError("Choose the directory containing the converted Faster Whisper model.")
+    print("  Calculating SHA-256…", flush=True)
+    return str(path), weight_digest(path)
+
+
+def setup(cfg, engine=None):
+    if not shutil.which("docker"):
+        raise ValueError("Install Docker Engine and Compose, then run setup again.")
+    deployment = cfg["deployment"]
+    previous_endpoint = (deployment["bind"], deployment["port"])
+    engine = engine or deployment["engine"]
+    profile = cfg[engine]
+    print("InnerVoice private Gateway setup")
+    print("Press Enter to keep a value in brackets. Ctrl+C cancels before saving.\n")
+    print("1/4  Private network")
+    print("  Use the server's IP on the network your voice client can reach.")
+    deployment["bind"] = prompt("Server's private IPv4 address", deployment["bind"], private_address)
+    deployment["port"] = prompt("HTTPS port", str(deployment["port"]), listen_port)
+    print("  Enter the client IP, or multiple IPs or subnets separated by commas.")
+    deployment["allowed_networks"] = prompt("Allowed clients", deployment["allowed_networks"], client_networks)
+
+    print("\n2/4  Whisper worker")
+    print(f"  Engine: {engine}. Reuse a local worker image and trusted model weights.")
+    print("  List local images with 'docker image ls'.")
+    default_image = profile["image"] or ("innervoice-whisper" if engine == "openai-whisper" else "")
+    image, image_id = prompt("Worker image", default_image, select_image)
+    model = prompt("Model size", profile["model"], select_model)
+    default_weights = profile["weights"] if model == profile["model"] else ""
+    cached = Path.home()/".cache"/"whisper"/f"{model}.pt"
+    if not default_weights and engine == "openai-whisper" and cached.is_file():
+        default_weights = str(cached)
+    weights, digest = prompt("Path to local weights", default_weights, lambda value: select_weights(value, engine))
+    if image == profile["image"] and profile["image_id"] and image_id != profile["image_id"]:
+        print("  The saved image tag now points to a different image.")
+    print(f"  Weights SHA-256: {digest}")
+    expected = profile["digest"] if weights == profile["weights"] else ""
+    if digest != expected:
+        print("  Compare this digest with your trusted source. Use only weights you have verified.")
+        if input("  Trust this checkpoint? [y/N]: ").strip().lower() not in ("y", "yes"):
+            raise SystemExit("Setup cancelled. Settings were not saved.")
+    profile.update(image=image, image_id=image_id, model=model, weights=weights, digest=digest)
+    deployment["engine"] = engine
+    validate(cfg)
+
+    print("\n3/4  HTTPS and client access")
+    secret_dir = Path(deployment["secrets"])
+    cert, key = secret_dir/"tls.crt", secret_dir/"tls.key"
+    create_tls = not (cert.exists() or key.exists())
+    if create_tls:
+        if not shutil.which("openssl"):
+            raise ValueError("Install openssl to create the Gateway certificate, or supply tls.crt and tls.key.")
+        print("  A self-signed certificate will be created for the server IP.")
+    else:
+        check_tls(secret_dir, deployment["bind"])
+        print("  Reusing the existing certificate and key.")
+    clients = secret_dir/"clients.json"
+    client_dir = HOME/"clients"/"operator-smoke"
+    create_client = not clients.exists()
+    if create_client:
+        print("  A smoke-test credential and client config will be saved locally.")
+    else:
+        check_clients(clients)
+        print("  Reusing existing client credentials.")
+
+    print("\n4/4  Review and save")
+    print(f"  URL: https://{deployment['bind']}:{deployment['port']}")
+    print(f"  Allowed clients: {deployment['allowed_networks']}")
+    print(f"  Worker: {image} ({image_id})")
+    print(f"  Model: {model} | New API jobs: {'enabled' if deployment['enable'] else 'disabled'}")
+    if input("  Save this setup? [y/N]: ").strip().lower() not in ("y", "yes"):
+        raise SystemExit("Setup cancelled. Settings were not saved.")
+    secret_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    created = []
+    try:
+        if create_tls:
+            generate_tls(secret_dir, deployment["bind"], created)
+        if create_client:
+            create_smoke_client(cfg, client_dir, created)
+        save_config(cfg)
+    except (Exception, KeyboardInterrupt):
+        for path in reversed(created):
+            path.unlink(missing_ok=True)
+        raise
+    print(f"Saved Gateway settings to {FILE}")
+    if create_client:
+        print(f"Smoke-test client files: {client_dir}")
+    elif previous_endpoint != (deployment["bind"], deployment["port"]):
+        print("Update your client URLs to match the new address or port.")
+    if not deployment["enable"]:
+        print("New API jobs are disabled. After checking network access, enable them with:")
+        print("  ./bin/innervoice config set deployment.enable=true")
+        print("  ./bin/innervoice restart")
+
+
+def write_new_file(path, data, created):
+    with path.open("xb") as stream:
+        created.append(path)
+        stream.write(data)
+
+
+def generate_tls(root, address, created):
+    with tempfile.TemporaryDirectory(dir=root) as directory:
+        staging = Path(directory)
+        try:
+            subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:3072", "-nodes", "-days", "90",
+                 "-subj", "/CN=InnerVoice", "-addext", f"subjectAltName=IP:{address}",
+                 "-keyout", str(staging/"tls.key"), "-out", str(staging/"tls.crt")],
+                capture_output=True, check=True,
+            )
+        except subprocess.CalledProcessError:
+            raise ValueError("OpenSSL could not generate the TLS certificate.") from None
+        check_tls(staging, address)
+        for name in ("tls.key", "tls.crt"):
+            write_new_file(root/name, (staging/name).read_bytes(), created)
+
+
+def create_smoke_client(cfg, directory, created):
+    d = cfg["deployment"]
+    root = Path(d["secrets"])
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    bearer = secrets.token_urlsafe(32)
+    token_file = directory/"bearer"
+    ca = directory/"ca.crt"
+    client = {"url": f"https://{d['bind']}:{d['port']}", "ca": str(ca),
+              "token_file": str(token_file), "state_dir": str(directory/"state"),
+              "deadline": 300, "source_ip": "", "source_port": 0}
+    write_new_file(token_file, bearer.encode(), created)
+    trust_cert = root/"ca.crt"
+    if not trust_cert.is_file():
+        trust_cert = root/"tls.crt"
+    write_new_file(ca, trust_cert.read_bytes(), created)
+    write_new_file(directory/"client.toml", serialize({"client": client}), created)
+    credential_map = {"operator-smoke": hashlib.sha256(bearer.encode()).hexdigest()}
+    write_new_file(root/"clients.json", json.dumps(credential_map).encode(), created)
 
 
 def env(cfg):
@@ -135,21 +337,7 @@ def compose(cfg,*args,capture=False):
                           cwd=REPO,env=env(cfg),check=True,capture_output=capture,text=True)
 
 
-def preflight(cfg):
-    d=cfg["deployment"]
-    p=cfg[d["engine"]]
-    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}",p["image"]) and not re.fullmatch(r"sha256:[0-9a-f]{64}",p["image_id"]):
-        raise ValueError("Set the provisioned candidate worker image by digest")
-    image_id=subprocess.check_output(["docker","image","inspect","--format","{{.Id}}",p["image"]],text=True).strip()
-    if p["image_id"] and p["image_id"]!=image_id:
-        raise ValueError("Provisioned image identity differs from manifest")
-    if not p["fp16"] and d["engine"]=="faster-whisper":
-        raise ValueError("Experimental engine requires float16")
-    if p["beam"]<1 or p["idle_seconds"]<0:
-        raise ValueError("Invalid decoder or idle settings")
-    weights=Path(p["weights"])
-    if not weights.is_absolute():
-        raise ValueError("Use an absolute local weights path")
+def weight_digest(weights):
     digest=hashlib.sha256()
     if weights.is_dir():
         files=sorted(f for f in weights.rglob("*") if f.is_file())
@@ -163,20 +351,54 @@ def preflight(cfg):
         with f.open("rb") as stream:
             while chunk:=stream.read(1024**2):
                 digest.update(chunk)
-    if digest.hexdigest()!=p["digest"]:
-        raise ValueError("Weight digest mismatch")
-    for name in ("clients.json","tls.key","tls.crt"):
-        if not (Path(d["secrets"])/name).is_file():
-            raise ValueError("Missing server secret file: "+name)
-    secret_dir=Path(d["secrets"])
+    return digest.hexdigest()
+
+
+def check_tls(secret_dir, address):
+    if not all((secret_dir/name).is_file() for name in ("tls.crt", "tls.key")):
+        raise ValueError("Install both tls.crt and tls.key in the configured secrets directory.")
     ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(secret_dir/"tls.crt",secret_dir/"tls.key")
     cert=ssl._ssl._test_decode_cert(str(secret_dir/"tls.crt"))
-    if ("IP Address",d["bind"]) not in cert.get("subjectAltName",()):
-        raise ValueError("Certificate must include the configured VLAN IP SAN")
-    clients=json.loads((secret_dir/"clients.json").read_bytes())
-    if not clients or len(set(clients.values())) != len(clients) or not all(re.fullmatch(r"[a-z0-9-]{1,48}",k) and re.fullmatch(r"[0-9a-f]{64}",v) for k,v in clients.items()):
+    if ("IP Address", address) not in cert.get("subjectAltName", ()):
+        raise ValueError("The TLS certificate must include the selected server IP. Install a matching certificate or keep the current IP.")
+    if not ssl.cert_time_to_seconds(cert["notBefore"]) <= time.time() < ssl.cert_time_to_seconds(cert["notAfter"]):
+        raise ValueError("The TLS certificate is expired or not yet valid. Install a currently valid certificate.")
+
+
+def check_clients(path):
+    if not path.is_file():
+        raise ValueError("Client credentials are missing. Run ./bin/innervoice config setup.")
+    clients = json.loads(path.read_bytes())
+    if not isinstance(clients, dict) or not clients or not all(
+        re.fullmatch(r"[a-z0-9-]{1,48}", label)
+        and isinstance(digest, str)
+        and re.fullmatch(r"[0-9a-f]{64}", digest)
+        for label, digest in clients.items()
+    ) or len(set(clients.values())) != len(clients):
         raise ValueError("Invalid credential map")
+
+
+def preflight(cfg):
+    d=cfg["deployment"]
+    p=cfg[d["engine"]]
+    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}",p["image"]) and not re.fullmatch(r"sha256:[0-9a-f]{64}",p["image_id"]):
+        raise ValueError("Run ./bin/innervoice config setup to pin the worker image.")
+    image_id = local_image_id(p["image"])
+    if p["image_id"] and p["image_id"]!=image_id:
+        raise ValueError("The worker image has changed. Run ./bin/innervoice config setup to review the new image.")
+    if not p["fp16"] and d["engine"]=="faster-whisper":
+        raise ValueError("Experimental engine requires float16")
+    if p["beam"]<1 or p["idle_seconds"]<0:
+        raise ValueError("Invalid decoder or idle settings")
+    weights=Path(p["weights"])
+    if not weights.is_absolute():
+        raise ValueError("Use an absolute local weights path")
+    if weight_digest(weights)!=p["digest"]:
+        raise ValueError("The weights have changed. Verify the checkpoint before updating its saved digest.")
+    secret_dir = Path(d["secrets"])
+    check_tls(secret_dir, d["bind"])
+    check_clients(secret_dir/"clients.json")
     Path(d["data"]).mkdir(mode=0o700,parents=True,exist_ok=True)
 
 
@@ -201,8 +423,11 @@ def snapshot(cfg,job=None):
 
 def operate(args):
     cfg=read(FILE) if FILE.exists() else {k:dict(v) for k,v in DEFAULT.items()}
-    if args.cmd=="initialize" or args.setup or (args.cmd=="config" and args.action in ("edit","setup")):
-        setup(cfg)
+    if args.cmd=="config" and args.action=="edit":
+        edit_config(cfg)
+        return
+    if args.cmd=="initialize" or args.setup or (args.cmd=="config" and args.action=="setup"):
+        setup(cfg, args.engine if args.cmd=="start" else None)
         if args.cmd!="start":
             return
     if not FILE.exists():
@@ -215,8 +440,7 @@ def operate(args):
                     raise ValueError("Select engine with start or restart --engine")
                 set_value(cfg,field,raw)
             validate(cfg)
-            atomic(HOME/"previous.toml",FILE.read_bytes())
-            atomic(FILE,serialize(cfg))
+            save_config(cfg)
         elif args.action=="show":
             visible={k:dict(v) for k,v in cfg.items()}
             for k in ("data","secrets","bind","allowed_networks"):
@@ -262,7 +486,12 @@ def operate(args):
         return
     if args.engine:
         cfg["deployment"]["engine"]=args.engine
+    if args.cmd=="start" and ACTIVE.exists() and active != cfg:
+        running=compose(active,"ps","--status","running","-q",capture=True).stdout.strip()
+        if running:
+            raise ValueError("Settings saved. Run ./bin/innervoice restart to apply them to the running deployment.")
     if args.cmd!="stop":
+        print("Checking the worker image, model weights and HTTPS configuration…", flush=True)
         preflight(cfg)
         # Complete candidate builds before interrupting an active service.
         compose(cfg,"build","bot","gateway")
@@ -286,11 +515,8 @@ def operate(args):
             drain.unlink(missing_ok=True)
     if args.cmd=="stop":
         return
-    if args.cmd=="start" and ACTIVE.exists() and serialize(active)!=serialize(cfg):
-        running=compose(active,"ps","--status","running","-q",capture=True).stdout.strip()
-        if running:
-            raise ValueError("Use restart to change active configuration")
     compose(cfg,"up","-d","--no-build","--pull","never")
+    print("Waiting for the Gateway and Whisper to respond…", flush=True)
     probe=("import requests; h=requests.get('http://127.0.0.1:9000/health',timeout=7).json(); "
            "g=requests.get('http://127.0.0.1:9000/gpu-check',timeout=7).json(); "
            "print(h['engine'],h['model'],h['profile'],g['gpu'].get('available',False))")
@@ -300,12 +526,15 @@ def operate(args):
             if compose(cfg,"exec","-T","gateway","python","-c",probe,capture=True).stdout.strip()==expected:
                 atomic(ACTIVE,serialize(cfg))
                 atomic(FILE,serialize(cfg))
+                d = cfg["deployment"]
+                print(f"Gateway ready at https://{d['bind']}:{d['port']}.")
+                print("Send a short test audio to verify inference.")
                 return
         except subprocess.CalledProcessError:
             pass
         time.sleep(2)
     compose(cfg,"stop","bot","gateway","whisper")
-    raise ValueError("Activation failed; restore the previous settings and run start")
+    raise ValueError("Activation failed. Inspect 'docker compose logs --tail=80 gateway whisper'. Restore the previous settings before retrying.")
 
 
 def main():
@@ -316,12 +545,14 @@ def main():
     parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential"])
     parser.add_argument("action",nargs="?")
     parser.add_argument("values",nargs="*")
-    parser.add_argument("--setup",action="store_true")
+    parser.add_argument("--setup",action="store_true",help="walk through private Gateway setup before starting")
     parser.add_argument("--engine",choices=ENGINES)
     parser.add_argument("--job")
     parser.add_argument("--watch",action="store_true")
     parser.add_argument("--identity")
     args=parser.parse_args()
+    if args.setup and args.cmd != "start":
+        parser.error("--setup is available with start. Use 'config setup' to configure without starting.")
     os.umask(0o077)
     HOME.mkdir(mode=0o700,parents=True,exist_ok=True)
     with (HOME/"operator.lock").open("a") as lock:
@@ -333,5 +564,7 @@ def main():
 if __name__=="__main__":
     try:
         main()
+    except (KeyboardInterrupt, EOFError):
+        sys.exit("Setup or command cancelled.")
     except (ValueError,KeyError,OSError,sqlite3.Error,subprocess.CalledProcessError) as error:
         sys.exit(str(error))

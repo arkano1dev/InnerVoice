@@ -14,8 +14,8 @@ The **Voice Gateway** accepts audio over private HTTPS, uses a shared Whisper wo
 
 ## Get started
 
-1. **Set up the server.** You'll need Linux, Docker Compose, a private network endpoint, a TLS certificate that covers that endpoint and a local multilingual Whisper model. Follow [server provisioning](docs/private-gateway.md#provision-the-server).
-2. **Verify the Gateway directly.** Use the [CLI quickstart](docs/private-gateway.md#gateway-quickstart) to configure and start the service. Run the [direct smoke check](docs/private-gateway.md#direct-smoke-first) with a short synthetic audio fixture.
+1. **Set up the server.** You'll need Linux, Docker Compose, a private network endpoint and a local multilingual Whisper model. The setup wizard can create the TLS certificate. Follow [server provisioning](docs/private-gateway.md#provision-the-server).
+2. **Verify the Gateway directly.** Run `./bin/innervoice start --setup` to configure and start it. Follow the [CLI quickstart](docs/private-gateway.md#gateway-quickstart). Run the [direct smoke check](docs/private-gateway.md#direct-smoke-first) with a short synthetic audio fixture.
 3. **Connect one client.** Follow the setup guide for your [agent](docs/private-gateway.md#agent-connection), [standalone bot](DOCUMENTATION.md) or [Ubuntu desktop](docs/private-gateway.md#desktop-role).
 
 The private Gateway and full-file agent integration are **Release A**. The desktop recorder and incremental session API are **Release B**. Deployment acceptance is pending. Release B also requires checks in a graphical Ubuntu session after Release A is accepted.

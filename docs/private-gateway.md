@@ -6,28 +6,29 @@ Candidate source handoff. All target-host, installed-provider, performance and d
 
 Use Python 3.11+, Docker Engine with Compose v2, FFmpeg and the supported compute runtime. On Python 3.10 install tomli. Run commands from the repository root. For a fresh install clone the repository and switch to the candidate branch. For an existing installation inventory the running project, existing port and callers, named volumes, image IDs, weights and protected environment first. Keep the same Compose project name. Preserve the prior checkout and tag the actual previous bot and worker images locally before recreating containers. Protect or exclude spool, SQLite including WAL/SHM, client state, audio, secrets and private operator evidence from backups.
 
-Provision a trusted local multilingual checkpoint before service startup. Use the incumbent model and verify its upstream checksum separately. The following variables are operator inputs: ROCM_BASE is the immutable runtime image reference, WEIGHTS the verified checkpoint file, SECRET_DIR the protected directory, and VLAN_IP the actual listener IP. The runtime override, if needed, belongs in the existing private Compose environment.
+Provision a trusted local multilingual checkpoint and a compatible worker image first. Reuse the known working worker image if it supports the Gateway profile checks, or build the candidate worker with your validated ROCm runtime:
 
 ```bash
-umask 077
 docker build --build-arg ROCM_BASE="$ROCM_BASE" -t innervoice-worker:candidate whisper
-docker image inspect --format '{{.Id}}' innervoice-worker:candidate
-sha256sum "$WEIGHTS"
-install -d -m 700 "$SECRET_DIR"
-openssl req -x509 -newkey rsa:3072 -nodes -days 90 -subj '/CN=InnerVoice' \
-  -addext "subjectAltName=IP:$VLAN_IP" -keyout "$SECRET_DIR/tls.key" -out "$SECRET_DIR/tls.crt"
-./bin/innervoice config setup
-./bin/innervoice credential --identity operator-smoke
-./bin/innervoice credential --identity telegram-agent
-./bin/innervoice config validate
-./bin/innervoice config show
-./bin/innervoice start
-./bin/innervoice status
 ```
 
-Use a new empty secret directory for certificate generation, or install an existing certificate and key there. Distribute only the trust certificate and a distinct random bearer secret per integration over a protected channel. Enter each bearer token at its masked credential prompt. The server stores its digest mapped to a stable integration label. Repeat the command with the same label to rotate. Ensure TLS files and clients.json are readable by the operator UID. Provision the bot token via the existing protected .env. The wizard asks for a real private bind IP and port, image tag plus image ID (or digest reference), local weight path, checksum and both engine profiles. Optional profile image and weights can remain empty until activation. Start with admission disabled. Set `deployment.allowed_networks` to the authorized private client IPv4 addresses or CIDRs, separated by commas. The HTTPS listener rejects peers outside that list before processing bearer credentials. It uses the actual socket peer address. Apply the same restriction at the host/VLAN boundary and check effective Docker forwarding, including that the authorized source arrives with its original address. Check that a connection from outside the list is denied. Docker publishes only the specified IP.
+Set `ROCM_BASE` to the approved base image reference by digest. Put any host-specific runtime override in the protected Compose environment. Keep the existing protected repository-root `.env` for the Telegram bot token, or set it up from `.env.example` for a new bot.
 
-On a prepared host, `start --setup` combines the configuration wizard with startup. Plain start and restart are unattended. First activation replaces the old port mapping; schedule it only after recording the baseline. The worker has no published host port. Legacy routes are available inside Compose on gateway:9000. The private HTTPS port serves only the versioned API.
+Run the guided setup from the repository root:
+
+```bash
+./bin/innervoice start --setup
+```
+
+Enter the server's private LAN or VLAN IPv4 address, HTTPS port, allowed client IPs or CIDRs, local worker image, multilingual model name and path to its weights. Setup reads the image ID from Docker and computes the checkpoint SHA-256. Compare the displayed digest with your trusted source before accepting a new or changed checkpoint. Use `config setup` to save the settings without starting services, and `config edit` or `config set` for advanced settings. An existing running Gateway takes saved changes on `restart`.
+
+Setup reuses the saved certificate and key if they match the chosen IP. If neither exists, it uses OpenSSL to create a self-signed certificate valid for 90 days. You can also install your own `tls.crt` and `tls.key` in the protected secrets directory before setup. For an existing CA-issued certificate, put its trust chain in `ca.crt` in the same directory if setup is creating a smoke-test client.
+
+On first setup, the wizard creates a local smoke-test client if the server has no credential map. Its bearer file, trust certificate and `client.toml` are under `~/.config/innervoice/clients/operator-smoke` by default. From another authorized machine, copy the public trust certificate and bearer file over a protected channel and adapt the paths in the client TOML. For the Telegram agent, provision a separate credential with `./bin/innervoice credential --identity telegram-agent`.
+
+The HTTPS listener rejects peers outside the configured private IPv4 addresses or CIDRs before processing bearer credentials. Apply the same restriction at the host/VLAN boundary and verify that Docker forwards the authorized source address. The worker has no published host port. Legacy routes are available inside Compose on `gateway:9000`. The private HTTPS port serves only the versioned API.
+
+First activation replaces the old port mapping. Schedule it after recording the baseline. Fresh setup leaves API job admission disabled until the direct smoke check.
 
 ## Check ROCm compatibility with the previous deployment
 
@@ -60,18 +61,8 @@ against the previous working image with the same operator settings.
 
 ## Gateway quickstart
 
-1. Prepare a Linux host with Python 3.11+, Docker Engine with Compose v2, the selected inference runtime, a private VLAN IPv4 address, and a TLS certificate that covers that address. Provision a verified local multilingual model and a worker image with a recorded digest or verified local image ID. See the [server provisioning guide](#provision-the-server) for the build, certificate, model checksum and Telegram bot token.
-2. Clone and configure the refactor branch as the deployment operator.
-
-   ```bash
-   git clone --branch refactor/private-voice-gateway https://github.com/arkano1dev/InnerVoice.git
-   cd InnerVoice
-   ./bin/innervoice config setup
-   ./bin/innervoice credential --identity operator-smoke
-   ./bin/innervoice config validate
-   ./bin/innervoice start
-   ./bin/innervoice status
-   ```
+1. Prepare the host, a trusted multilingual checkpoint and a compatible worker image. Follow [server provisioning](#provision-the-server).
+2. In the candidate checkout run `./bin/innervoice start --setup`, then `./bin/innervoice status`. Use `./bin/innervoice config setup` if you want to configure before starting.
 
 3. Set `deployment.bind` to the server's private address, `deployment.port` to the agreed listener port, and `deployment.allowed_networks` to the comma-separated private IPv4 addresses or CIDRs for the clients. Include the direct smoke client. Enforce the same restriction at the host/VLAN boundary. Keep deployment settings, weights, credentials, certificates, audio and runtime state outside the checkout. The worker and the bot compatibility listener have no published host ports.
 4. Start with admission disabled while checking the private listener and bot. When ready for the first direct smoke test, enable jobs and restart.
@@ -99,7 +90,8 @@ Run commands from the repository root. Deployment edits apply on activation. Rot
 
 | Command | Behavior |
 | --- | --- |
-| `initialize`, `config setup`, `config edit` | Run the interactive deployment configuration wizard and save settings after confirmation. |
+| `initialize`, `config setup` | Run the guided setup and save settings after confirmation. |
+| `config edit` | Review and edit advanced settings interactively. |
 | `config show` | Show saved configuration with local addresses and paths redacted. Keep the output private. |
 | `config validate` | Validate saved settings. Startup also checks the worker image, model weights, TLS identity and credential map. |
 | `config set SECTION.KEY=VALUE [SECTION.KEY=VALUE ...]` | Save one or more validated edits. Booleans take `true` or `false`. |
@@ -130,7 +122,7 @@ Run commands from the repository root. Deployment edits apply on activation. Rot
 
 ## Direct smoke first
 
-Install requests on the client (and tomli on Python 3.10). Save this TOML outside the repository. Replace all placeholder strings including paths. Use a unique restricted state directory per integration.
+Install requests on the client (and tomli on Python 3.10). Use the generated local smoke-test TOML, or create this TOML outside the repository. Replace all placeholders with the client machine’s values. Use a unique restricted state directory per integration.
 
 ```toml
 [client]
