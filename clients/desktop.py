@@ -317,7 +317,7 @@ def run_graphical():
 
 def graphical(listener):
     from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier
-    from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter
+    from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette
     from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
 
     cfg = json.loads(CONFIG.read_bytes())
@@ -345,49 +345,100 @@ def graphical(listener):
 
     root = RecorderWindow()
     root.setWindowTitle("InnerVoice")
-    root.resize(520, 300)
-    root.setMinimumSize(360, 220)
-    root.setStyleSheet("""
-        QWidget {background:#191b20;color:#edeef2;font-size:14px}
-        QLabel#status {color:#bfc7d2}
-        QLabel#elapsed {color:#ff8792;font-weight:600}
-        QTextEdit {background:#23262d;border:1px solid #474d58;border-radius:9px;
-                   padding:10px;font-size:16px;selection-background-color:#376467}
-        QTextEdit:focus, QPushButton:focus {border:1px solid #96d9cf}
-        QPushButton {background:#30353d;border:1px solid #4a505b;border-radius:7px;
-                     padding:6px 10px}
-        QPushButton:hover {background:#414752}
-        QPushButton:pressed {background:#272c33}
-        QPushButton:disabled {color:#969ba3}
-        QPushButton#record {background:#a1dfd3;color:#132521;font-weight:600}
-        QPushButton#record:hover {background:#baeee4}
-        QPushButton#record[recording="true"] {background:#ff9aa5;color:#351319}
-        QProgressBar {background:#30353d;border:0;border-radius:2px}
-        QProgressBar::chunk {background:#ff8792;border-radius:2px}
+    root.resize(540, 328)
+    root.setMinimumSize(360, 248)
+    root.setObjectName("recorder")
+    dark = app.palette().color(QPalette.Window).lightness() < 128
+    canvas, paper, ink, muted, line, hover, accent, on_accent, live, on_live = (
+        ("#1b1c21", "#25262d", "#f4f1f8", "#bcb7c8", "#42414c", "#37353f",
+         "#d5c6ff", "#2b2041", "#ffb5af", "#421e20") if dark else
+        ("#f4f2f7", "#ffffff", "#25232c", "#655f70", "#d9d5df", "#edeaf2",
+         "#53466f", "#ffffff", "#92444b", "#ffffff")
+    )
+    root.setStyleSheet(f"""
+        QWidget#recorder {{background:{canvas};color:{ink}}}
+        QWidget#sheet, QMenu {{background:{paper};border:1px solid {line};border-radius:14px}}
+        QLabel {{background:transparent;color:{muted};font-size:13px}}
+        QLabel#heading {{color:{ink};font-size:22px;font-weight:600}}
+        QLabel#elapsed {{color:{live};font-size:14px;font-weight:600}}
+        QTextEdit {{background:{paper};color:{ink};border:1px solid transparent;
+                   border-radius:8px;padding:4px;font-size:17px;
+                   selection-background-color:{accent};selection-color:{on_accent}}}
+        QPushButton {{background:transparent;color:{ink};border:1px solid transparent;
+                     border-radius:15px;padding:6px 12px;font-size:14px}}
+        QPushButton:hover, QMenu::item:selected {{background:{hover};color:{ink}}}
+        QPushButton:disabled {{color:{muted}}}
+        QPushButton#record {{background:{accent};color:{on_accent};font-weight:600;padding:6px 18px}}
+        QPushButton#record[recording="true"] {{background:{live};color:{on_live}}}
+        QPushButton#record:hover {{border-color:{ink}}}
+        QPushButton:focus, QTextEdit:focus {{border-color:{accent}}}
+        QPushButton#record:focus {{border:2px solid {ink};padding:5px 17px}}
+        QPushButton#more {{font-size:20px;padding:0}}
+        QPushButton#more::menu-indicator {{image:none}}
+        QProgressBar {{background:{line};border:0;border-radius:2px}}
+        QProgressBar::chunk {{background:{live};border-radius:2px}}
+        QMenu {{color:{ink};padding:5px;border-radius:6px}}
+        QMenu::item {{padding:5px 10px}}
     """)
     layout = QVBoxLayout(root)
-    layout.setContentsMargins(18, 14, 18, 14)
-    layout.setSpacing(10)
+    layout.setContentsMargins(18, 15, 18, 16)
+    layout.setSpacing(12)
     header = QHBoxLayout()
+    header.setSpacing(10)
+    mark = QPixmap(32, 32)
+    mark.fill(Qt.transparent)
+    painter = QPainter(mark)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(accent))
+    painter.drawRoundedRect(0, 0, 32, 32, 10, 10)
+    painter.setBrush(QColor(on_accent))
+    for x, height in zip((6, 10, 14, 18, 22), (6, 14, 20, 10, 6)):
+        painter.drawRoundedRect(x, (32 - height) // 2, 3, height, 1.5, 1.5)
+    painter.end()
+    emblem = QLabel()
+    emblem.setPixmap(mark)
+    header.addWidget(emblem)
+    heading = QLabel("Dictation")
+    heading.setObjectName("heading")
+    header.addWidget(heading, 1)
+    layout.addLayout(header)
+
+    sheet = QWidget()
+    sheet.setObjectName("sheet")
+    layout.addWidget(sheet, 1)
+    body = QVBoxLayout(sheet)
+    body.setContentsMargins(10, 10, 10, 10)
+    body.setSpacing(6)
+    feedback = QHBoxLayout()
+    feedback.setContentsMargins(6, 0, 6, 0)
     status = QLabel("Ready to record")
     status.setObjectName("status")
     status.setWordWrap(True)
-    header.addWidget(status, 1)
+    feedback.addWidget(status, 1)
     elapsed = QLabel()
     elapsed.setObjectName("elapsed")
-    header.addWidget(elapsed)
-    layout.addLayout(header)
+    feedback.addWidget(elapsed)
     meter = QProgressBar()
     meter.setTextVisible(False)
-    meter.setFixedHeight(5)
-    layout.addWidget(meter)
+    meter.setFixedSize(46, 4)
+    meter.setRange(0, 100)
+    meter.setValue(0)
+    meter.setAccessibleName("Microphone level")
+    feedback.addWidget(meter)
+    meter.hide()
     editor = QTextEdit()
     editor.setAcceptRichText(False)
-    editor.setPlaceholderText("Your transcript appears here")
+    editor.setPlaceholderText("Record a thought…")
+    palette = editor.palette()
+    palette.setColor(QPalette.PlaceholderText, QColor(muted))
+    editor.setPalette(palette)
     editor.setAccessibleName("Transcript")
-    layout.addWidget(editor, 1)
+    body.addWidget(editor, 1)
+    body.addLayout(feedback)
     buttons = QHBoxLayout()
-    layout.addLayout(buttons)
+    buttons.setSpacing(4)
+    body.addLayout(buttons)
     tray = QSystemTrayIcon(app)
     menu = QMenu()
     tray.setContextMenu(menu)
@@ -559,6 +610,7 @@ def graphical(listener):
     start_button.setObjectName("record")
 
     def set_recording(active):
+        meter.setVisible(active)
         start_button.setText("Stop" if active else "Record")
         start_button.setProperty("recording", active)
         start_button.style().unpolish(start_button)
@@ -575,9 +627,13 @@ def graphical(listener):
     buttons.addStretch()
     buttons.addWidget(copy_button)
     recovery = QMenu(root)
-    recover_button = QPushButton("Recover")
+    recover_button = QPushButton("⋯")
+    recover_button.setObjectName("more")
+    recover_button.setFixedSize(34, 32)
+    recover_button.setAccessibleName("Recover a recording")
+    recover_button.setToolTip("Recover a recording")
     recover_button.setMenu(recovery)
-    buttons.addWidget(recover_button)
+    header.addWidget(recover_button)
 
     def recover(saved):
         nonlocal directory, state, replace_session
