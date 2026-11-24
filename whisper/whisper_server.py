@@ -16,7 +16,17 @@ model_size = os.getenv("WHISPER_MODEL", "medium")
 engine = os.environ.get("WHISPER_ENGINE", "openai-whisper")
 device = os.getenv("WHISPER_DEVICE","cuda")
 weights = os.environ.get("WHISPER_LOCAL_WEIGHTS")
-if weights and (model_size.endswith(".en") or "turbo" in model_size):
+if not weights or not os.path.exists(weights):
+    raise ValueError("Mount a trusted local model and configure WHISPER_LOCAL_WEIGHTS")
+if os.getuid() == 0 or os.getgid() == 0:
+    raise RuntimeError("Private inference requires a non-root identity")
+with open("/proc/swaps") as swaps, open("/proc/self/mountinfo") as mounts:
+    if len(swaps.readlines()) > 1 or not any(
+        row.split()[4] == "/tmp" and row.split(" - ")[1].startswith("tmpfs ") for row in mounts
+    ):
+        raise RuntimeError("Private inference requires RAM-backed temporary storage and swap disabled")
+tempfile.tempdir = "/tmp"
+if model_size.endswith(".en") or "turbo" in model_size:
     raise ValueError("Selected weights must support speech-to-English translation")
 
 
@@ -106,7 +116,7 @@ def get_model():
 
             if engine == "openai-whisper":
                 import whisper
-                _model = whisper.load_model(weights or model_size, device=device)
+                _model = whisper.load_model(weights, device=device)
             elif engine == "faster-whisper" and weights:
                 _model = FasterEngine()
             else:

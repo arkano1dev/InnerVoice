@@ -119,6 +119,7 @@ Run commands from the repository root. Deployment edits apply on activation. Rot
 | `restart [--engine ENGINE]` | Validate and prepare the candidate, drain work, and activate it. Engine names are `openai-whisper` and `faster-whisper`. A drain timeout aborts the cutover. |
 | `stop` | Drain and stop the service containers. |
 | `status` | Show Compose service state, the saved and active engine settings, and pending edits. |
+| `audit` | Use a locally installed Grype to scan the immutable image IDs of the running Gateway, worker and optional bot. High or critical findings and scanner errors return failure. |
 | `dashboard [--watch] [--job ID]` | Show local job and service metadata, optionally refreshing continuously or filtering by job ID. |
 | `desktop setup`, `desktop start`, `desktop status`, `desktop stop` | Configure, start, inspect or stop the desktop user service. |
 | `desktop run` | Run the configured desktop recorder in the foreground from a supported graphical session. |

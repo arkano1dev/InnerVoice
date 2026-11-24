@@ -516,6 +516,42 @@ def operate(args):
         return
     validate(cfg)
     active=read(ACTIVE) if ACTIVE.exists() else cfg
+    if args.cmd == "audit":
+        if not shutil.which("grype"):
+            raise ValueError("Install Grype on the operator host to scan the exact running images")
+        services = ["gateway","whisper"] + (["bot"] if active["deployment"]["telegram"] else [])
+        failed = []
+        for service in services:
+            container = compose(active,"ps","--status","running","-q",service,capture=True).stdout.strip()
+            if not container:
+                raise ValueError(f"{service} is not running")
+            image = subprocess.check_output(["docker","inspect","--format","{{.Image}}",container], text=True).strip()
+            if service == "gateway":
+                project = subprocess.check_output(
+                    ["docker","inspect","--format",'{{index .Config.Labels "com.docker.compose.project"}}',container],
+                    text=True).strip()
+                old_volumes = subprocess.check_output(
+                    ["docker","volume","ls","-q","--filter","label=com.docker.compose.project="+project,
+                     "--filter","label=com.docker.compose.volume=audio_temp"], text=True).splitlines()
+                for volume in old_volumes:
+                    check = ("from pathlib import Path; import sys; "
+                             "sys.exit(any(p.suffix.lower() in {'.ogg','.wav','.pcm','.raw','.upload','.part'} "
+                             "for p in Path('/legacy').iterdir()))")
+                    scan = subprocess.run(
+                        ["docker","run","--rm","--pull","never","--network","none","--read-only",
+                         "--cap-drop","ALL","--security-opt","no-new-privileges","--user",f"{os.getuid()}:{os.getgid()}",
+                         "--mount",f"type=volume,source={volume},target=/legacy,readonly,volume-nocopy",
+                         "--entrypoint","python",image,"-c",check])
+                    if scan.returncode:
+                        print("Legacy bot volume contains audio or could not be inspected:", volume)
+                        failed.append("legacy bot storage")
+            print(f"Scanning {service} {image}", flush=True)
+            result = subprocess.run(["grype","docker:"+image,"--fail-on","high"])
+            if result.returncode:
+                failed.append(service)
+        if failed:
+            raise ValueError("Review scan failures or findings for: " + ", ".join(failed))
+        return
     if args.cmd in ("logs", "build", "worker-only"):
         if args.action and args.action not in ("gateway", "whisper", "bot"):
             raise ValueError("Choose gateway, whisper or bot")
@@ -649,7 +685,7 @@ Daily operation
   stop                   Drain jobs and stop services.
   desktop                Manage a native desktop client (setup/start/stop/status/check).
   agent setup            Save a local connection for the command STT provider.""")
-    parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential","logs","build","worker-only"])
+    parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential","logs","build","worker-only","audit"])
     parser.add_argument("action",nargs="?")
     parser.add_argument("values",nargs="*")
     parser.add_argument("--setup",action="store_true",help="walk through private Gateway setup before starting")
@@ -667,7 +703,7 @@ Daily operation
     os.umask(0o077)
     HOME.mkdir(mode=0o700,parents=True,exist_ok=True)
     with (HOME/"operator.lock").open("a") as lock:
-        if args.cmd not in ("dashboard","status","logs"):
+        if args.cmd not in ("dashboard","status","logs","audit"):
             fcntl.flock(lock,fcntl.LOCK_EX)
         operate(args)
 
