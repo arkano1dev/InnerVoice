@@ -244,7 +244,7 @@ def _transcribe():
                 temperature=(0.0,),  # single temp avoids fallback loops
             )
         except Exception as e:
-            logger.error(f"Transcription error: {e}")
+            logger.error("Transcription failed (%s)", type(e).__name__)
             _gpu_cache_clear()
             err_str = str(e).lower()
             # Return 503 so clients can queue and retry when VRAM is free (same UX for busy and OOM)
@@ -264,7 +264,7 @@ def _transcribe():
                     }),
                     503,
                 )
-            return jsonify({"error": str(e)}), 500
+            return jsonify({"error": "inference_failed"}), 500
         finally:
             try:
                 os.unlink(tmp.name)

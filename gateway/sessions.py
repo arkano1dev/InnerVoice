@@ -111,7 +111,9 @@ def routes(api):
 
     @api.post("/v1/sessions/<ident>/finalize")
     def finalize(ident):
-        body=request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jobs.failure("invalid_last_index", 400)
         last=body.get("last_index")
         if type(last) is not int or not 0<=last<120:
             return jobs.failure("invalid_last_index",400)

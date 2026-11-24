@@ -877,7 +877,7 @@ docker compose logs -f bot
 
 4. **After Whisper is stable**: Once the whisper container runs and listens on 9000, the "Cannot connect to whisper:9000" errors in the bot will stop. The network (e.g. `TelegramNet`) is fine; the issue is the service not being up.
 
-5. **Whisper exits 139 (segfault) or restarts**: If you have a local **GPU-TROUBLESHOOTING.md** (optional, gitignored), see it for a full brainstorm. Otherwise: ensure host has `video` and `render` groups, try `WHISPER_MODEL=tiny`, `HSA_OVERRIDE_GFX_VERSION=11.0.3`, image `rocm/pytorch:latest`; or run Whisper on the host and point the bot at it.
+5. **Worker exits or restarts**. Check runtime compatibility and logs privately. Follow the [Gateway operator guide](docs/private-gateway.md) for the active worker image and model profile.
 
 ### Out of Memory
 

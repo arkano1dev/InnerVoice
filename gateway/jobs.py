@@ -20,6 +20,8 @@ from pathlib import Path
 
 import requests
 from flask import Flask, request
+from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.formparser import FormDataParser
 from lingua import Language, LanguageDetectorBuilder
 
 import legacy
@@ -39,6 +41,7 @@ admission = threading.Lock()
 rejection_lock = threading.Lock()
 rejections = {}
 uploads = set()
+replay_slots = threading.BoundedSemaphore(2)
 reserved = 0
 last_owner = None
 detector = LanguageDetectorBuilder.from_all_spoken_languages().build()
@@ -132,18 +135,49 @@ def space_available(budget):
     return used + reserved + budget <= setting("quota_mib",1024)*1024**2 and shutil.disk_usage(ROOT).free >= reserved + budget + setting("free_floor_mib",64)*1024**2
 
 
-def reserve(owner, ident):
-    global reserved
-    with admission, database() as db:
-        if sum(o == owner for o, _ in uploads) >= 1:
-            return failure("client_capacity", 429)
-        if len(uploads) >= setting("uploads",2):
-            return failure("upload_capacity", 503)
-        budget = 2 * LIMIT + PCM_LIMIT + 65536
-        if not space_available(budget):
-            return failure("storage_capacity", 503)
-        uploads.add((owner, ident))
-        reserved += budget
+def replay_existing(row):
+    """Hash a bounded replay without creating another audio spool file."""
+    if not replay_slots.acquire(blocking=False):
+        return failure("replay_capacity", 503)
+
+    class AudioDigest:
+        def __init__(self):
+            self.size = 0
+            self.digest = hmac.new((ROOT / "fingerprint.key").read_bytes(), digestmod="sha256")
+
+        def write(self, data):
+            self.size += len(data)
+            if self.size > LIMIT:
+                raise RequestEntityTooLarge()
+            self.digest.update(data)
+
+        def seek(self, offset):
+            if offset != 0:
+                raise ValueError("Invalid multipart offset")
+
+        def close(self):
+            pass
+
+    try:
+        parser = FormDataParser(
+            stream_factory=lambda **_: AudioDigest(),
+            max_content_length=LIMIT + 65536,
+            max_form_memory_size=api.config["MAX_FORM_MEMORY_SIZE"],
+            max_form_parts=3,
+        )
+        _, fields, files = parser.parse(
+            request.stream, request.mimetype, request.content_length, request.mimetype_params
+        )
+        if fields or set(files) != {"audio"} or len(files.getlist("audio")) != 1:
+            return failure("invalid_fields", 400)
+        signature = files["audio"].stream.digest.hexdigest()
+        if not hmac.compare_digest(row["digest"], signature):
+            return failure("idempotency_conflict", 409)
+        return failure("expired", 410) if row["state"] == "expired" else accepted(row)
+    except RequestEntityTooLarge:
+        return failure("size_limit", 413)
+    finally:
+        replay_slots.release()
 
 
 @api.post("/v1/jobs")
@@ -153,12 +187,26 @@ def submit():
     key = request.headers.get("Idempotency-Key", "")
     if not 1 <= len(key) <= 128:
         return failure("invalid_key", 400)
-    if paused():
-        return failure("admission_disabled", 503)
+    claim = (owner, key)
+    budget = 2 * LIMIT + PCM_LIMIT + 65536
+    with admission, database() as db:
+        old = db.execute("SELECT * FROM jobs WHERE owner=? AND replay=?", claim).fetchone()
+        if not old:
+            if claim in uploads:
+                return failure("submission_pending", 503)
+            if paused():
+                return failure("admission_disabled", 503)
+            if any(client == owner for client, _ in uploads):
+                return failure("client_capacity", 429)
+            if len(uploads) >= setting("uploads", 2):
+                return failure("upload_capacity", 503)
+            if not space_available(budget):
+                return failure("storage_capacity", 503)
+            uploads.add(claim)
+            reserved += budget
+    if old:
+        return replay_existing(old)
     ident = uuid.uuid4().hex
-    denied = reserve(owner, ident)
-    if denied:
-        return denied
     started=time.time()
     source = ROOT / (ident + ".upload")
     pcm = ROOT / (ident + ".part")
@@ -178,12 +226,6 @@ def submit():
                 head[4:8]==b"ftyp" or (len(head)>=2 and head[0]==255 and head[1]&224==224)):
             return failure("unsupported_audio",415)
         signature = digest.hexdigest()
-        with database() as db:
-            old = db.execute("SELECT * FROM jobs WHERE owner=? AND replay=?", (owner,key)).fetchone()
-        if old:
-            if old["digest"] != signature:
-                return failure("idempotency_conflict", 409)
-            return failure("expired", 410) if old["state"] == "expired" else accepted(old)
         decode_start=time.monotonic()
         command = ["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe",
                    "-format_whitelist", "ogg,wav,mp3,flac,mov,matroska,webm,aac",
@@ -200,7 +242,9 @@ def submit():
         with admission, database() as db:
             old = db.execute("SELECT * FROM jobs WHERE owner=? AND replay=?", (owner,key)).fetchone()
             if old:
-                return accepted(old) if old["digest"] == signature else failure("idempotency_conflict",409)
+                if old["digest"] != signature:
+                    return failure("idempotency_conflict", 409)
+                return failure("expired", 410) if old["state"] == "expired" else accepted(old)
             if paused():
                 return failure("admission_disabled",503)
             counts = db.execute("SELECT count(*),sum(owner=?) FROM jobs WHERE state IN ('queued','processing')",(owner,)).fetchone()
@@ -218,11 +262,13 @@ def submit():
     except subprocess.TimeoutExpired:
         return failure("decode_timeout",422)
     finally:
-        source.unlink(missing_ok=True)
-        pcm.unlink(missing_ok=True)
-        with admission:
-            uploads.remove((owner, ident))
-            reserved -= 2 * LIMIT + PCM_LIMIT + 65536
+        try:
+            source.unlink(missing_ok=True)
+            pcm.unlink(missing_ok=True)
+        finally:
+            with admission:
+                uploads.remove(claim)
+                reserved -= budget
 
 
 @api.get("/v1/jobs/<ident>")

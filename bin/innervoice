@@ -27,6 +27,7 @@ HOME = Path(os.environ.get("INNERVOICE_CONFIG_DIR", Path.home()/".config/innervo
 FILE = HOME/"deployment.toml"
 ACTIVE = HOME/"active.toml"
 ENGINES = ("openai-whisper","faster-whisper")
+PRIVATE_NETWORKS = tuple(ipaddress.IPv4Network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 DEFAULT = {"deployment":{"version":1,"engine":ENGINES[0],"bind":"","allowed_networks":"","port":9000,"enable":False,
                          "data":str(HOME/"state"),"secrets":str(HOME/"secrets")},
            "limits":{"max_seconds":3600,"upload_mib":128,"quota_mib":1024,"free_floor_mib":64,"jobs":8,"jobs_per_owner":4,"uploads":2,"attempts":3},
@@ -64,14 +65,14 @@ def read(path):
 
 def validate(cfg):
     d=cfg["deployment"]
-    ip=ipaddress.ip_address(d["bind"])
-    if ip.version!=4 or not ip.is_private or ip.is_unspecified or ip.is_loopback or ip.is_multicast:
+    ip=ipaddress.IPv4Address(d["bind"])
+    if not any(ip in network for network in PRIVATE_NETWORKS):
         raise ValueError("Choose a private VLAN IPv4 address")
     if not 1<=d["port"]<=65535 or d["engine"] not in ENGINES or d["version"]!=1:
         raise ValueError("Invalid deployment settings")
-    for network in d["allowed_networks"].split(","):
-        if network.strip():
-            ipaddress.ip_network(network.strip(),strict=False)
+    networks = [ipaddress.IPv4Network(part.strip()) for part in d["allowed_networks"].split(",") if part.strip()]
+    if not networks or any(not any(network.subnet_of(private) for private in PRIVATE_NETWORKS) for network in networks):
+        raise ValueError("Specify allowed private client addresses or CIDRs")
     for section,values in DEFAULT.items():
         for key,default in values.items():
             if type(cfg[section][key]) is not type(default):
@@ -123,7 +124,7 @@ def env(cfg):
     return dict(os.environ,**options,IV_FP16=str(p["fp16"]).lower(),IV_BEAM=str(p["beam"]),
                 IV_PREVIOUS=str(p["previous_text"]).lower(),IV_COMPILE=str(p["compile"]).lower(),IV_IDLE=str(p["idle_seconds"]),
                 IV_ENGINE=d["engine"],IV_UID=str(os.getuid()),IV_GID=str(os.getgid()),
-                IV_BIND=d["bind"],IV_PORT=str(d["port"]),IV_ENABLE=str(int(d["enable"])),
+                IV_BIND=d["bind"],IV_ALLOWED_NETWORKS=d["allowed_networks"],IV_PORT=str(d["port"]),IV_ENABLE=str(int(d["enable"])),
                 IV_IMAGE=p["image"],IV_WEIGHTS=p["weights"],IV_MODEL=p["model"],IV_DIGEST=p["digest"],
                 IV_DATA=d["data"],IV_SECRETS=d["secrets"],IV_BOT=json.dumps(cfg["bot.defaults"]),
                 IV_REVISION=hashlib.sha256(json.dumps([p,d["engine"],cfg["validation"],"decoder-v1"],sort_keys=True).encode()).hexdigest())
@@ -174,7 +175,7 @@ def preflight(cfg):
     if ("IP Address",d["bind"]) not in cert.get("subjectAltName",()):
         raise ValueError("Certificate must include the configured VLAN IP SAN")
     clients=json.loads((secret_dir/"clients.json").read_bytes())
-    if not clients or not all(re.fullmatch(r"[a-z0-9-]{1,48}",k) and re.fullmatch(r"[0-9a-f]{64}",v) for k,v in clients.items()):
+    if not clients or len(set(clients.values())) != len(clients) or not all(re.fullmatch(r"[a-z0-9-]{1,48}",k) and re.fullmatch(r"[0-9a-f]{64}",v) for k,v in clients.items()):
         raise ValueError("Invalid credential map")
     Path(d["data"]).mkdir(mode=0o700,parents=True,exist_ok=True)
 

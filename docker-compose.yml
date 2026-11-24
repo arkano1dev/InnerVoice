@@ -48,10 +48,7 @@ services:
           memory: 5G
           cpus: "4"
     security_opt:
-      - seccomp:unconfined
-    cap_add:
-      - SYS_PTRACE
-    ipc: host
+      - no-new-privileges:true
     shm_size: "2g"
     devices:
       - /dev/kfd
