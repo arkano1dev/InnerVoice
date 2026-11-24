@@ -9,7 +9,7 @@ export IV_UID=$(id -u) IV_GID=$(id -g)
 export IV_DATA="$temp/state" IV_SECRETS="$temp/tls" IV_ACCESS_DIR="$temp/access"
 export IV_SOCKET_DIR="$temp/socket" IV_BEARER_FILE="$temp/bearer" IV_WEIGHTS="$temp/model"
 export IV_ALLOWED_NETWORKS="127.0.0.1/32,172.16.0.0/12" IV_PUBLISH=127.0.0.1 IV_PORT=0
-export IV_ENABLE=1 IV_REVISION=fixture IV_MODEL=tiny IV_IMAGE="$COMPOSE_PROJECT_NAME-gateway"
+export IV_RETAINED_TERMS="synthetic recording" IV_ENABLE=1 IV_REVISION=fixture IV_MODEL=tiny IV_IMAGE="$COMPOSE_PROJECT_NAME-gateway"
 export IV_ENGINE=openai-whisper IV_FP16=false IV_BEAM=1 IV_PREVIOUS=false IV_COMPILE=false IV_IDLE=0 IV_DIGEST=fixture
 export IV_BOT='{}' TELEGRAM_USER_ID=12345678 BOT_TOKEN="12345678:$(openssl rand -hex 20)"
 mkdir -m 700 "$IV_DATA" "$IV_SECRETS" "$IV_ACCESS_DIR" "$IV_SOCKET_DIR"
@@ -17,7 +17,7 @@ touch "$IV_WEIGHTS"
 openssl rand -hex 32 > "$IV_BEARER_FILE"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=fixture -addext subjectAltName=IP:127.0.0.1 \
   -keyout "$IV_SECRETS/tls.key" -out "$IV_SECRETS/tls.crt" 2>/dev/null
-# Build the real Gateway and bot. The worker fixture only provides health for this CPU test.
+# Build the real Gateway and bot. Exercise worker request handling with a CPU fixture model.
 cat > "$temp/worker.yml" <<YAML
 services:
   whisper:
@@ -25,7 +25,10 @@ services:
     build: !reset null
     group_add: !reset []
     devices: !reset []
-    command: [python, -m, http.server, "9000"]
+    volumes:
+      - "$PWD/whisper/whisper_server.py:/app/whisper_server.py:ro"
+      - "$PWD/tests/docker_worker_fixture.py:/app/fixture.py:ro"
+    command: [python, /app/fixture.py]
   bot:
     command: [python, -c, "import time; time.sleep(900)"]
 YAML
@@ -76,15 +79,17 @@ path = "/v1/sessions/"+result["session_id"]
 audio = io.BytesIO()
 with wave.open(audio,"wb") as stream:
     stream.setparams((1,2,16000,0,"NONE","not compressed"))
-    stream.writeframes(bytes(32000))
+    stream.writeframes(bytes((1, 0))*16000)
 assert call("PUT",path+"/fragments/0",headers | {"Content-Type":"audio/wav"},audio.getvalue())[0]==201
 assert call("POST",path+"/finalize",headers | {"Content-Type":"application/json"},b'{"last_index":0}')[0]==202
 for attempt in range(30):
-    if call("GET",path,headers)[1]["state"]=="succeeded":
+    result = call("GET",path,headers)[1]
+    if result["state"]=="succeeded":
+        assert result["segments"][0]["text"] == "synthetic recording"
         break
     time.sleep(1)
 else:
-    raise RuntimeError("Silent synthetic session did not finish")
+    raise RuntimeError("Synthetic session did not finish")
 rotate(secrets.token_hex(32))
 assert call("GET",path,headers)[0]==401
 assert not any(f.suffix in (".pcm",".upload",".part",".wav") for f in Path(os.environ["IV_DATA"]).iterdir())
@@ -102,7 +107,12 @@ async def check():
         async with session.get("http://localhost/health", headers={"Authorization":"invalid"}) as result:
             assert result.status == 401
         async with session.get("http://localhost/health") as result:
-            assert result.status == 404  # worker fixture received the authenticated request
+            assert result.status == 200 and (await result.json())["status"] == "healthy"
+    from types import SimpleNamespace
+    for uid, chat_type, expected in ((bot.AUTHORIZED_USER,"private",True), (bot.AUTHORIZED_USER+1,"private",False), (bot.AUTHORIZED_USER,"group",False)):
+        event = SimpleNamespace(from_user=SimpleNamespace(id=uid), chat=SimpleNamespace(type=chat_type))
+        permitted, _ = await bot.dp.message.check_root_filters(event)
+        assert bool(permitted) == expected
     for name in ("gateway","whisper"):
         try:
             socket.getaddrinfo(name,9000)
