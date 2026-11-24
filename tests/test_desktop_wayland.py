@@ -122,6 +122,20 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertEqual(command.splitlines()[-6:],
                              ["exec", "-T", "desktop", "/opt/innervoice/bin/python", "/app/desktop.py", "toggle"])
 
+    def test_host_network_is_an_explicit_compose_override(self):
+        launcher = ROOT / "bin" / "innervoice-desktop"
+        with tempfile.TemporaryDirectory() as directory:
+            docker = Path(directory) / "docker"
+            docker.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            docker.chmod(0o700)
+            env = dict(os.environ, PATH=f"{directory}:{os.environ['PATH']}")
+            default = subprocess.check_output([launcher, "status"], env=env | {"INNERVOICE_DESKTOP_HOST_NETWORK": "0"}, text=True)
+            host = subprocess.check_output([launcher, "status"], env=env | {"INNERVOICE_DESKTOP_HOST_NETWORK": "1"}, text=True)
+            override = str(ROOT / "compose.desktop.host-network.yml")
+            self.assertNotIn(override, default.splitlines())
+            self.assertIn(override, host.splitlines())
+            self.assertEqual(host.splitlines()[-3:], ["ps", "-a", "desktop"])
+
     @unittest.skipUnless(importlib.util.find_spec("PyQt5"), "PyQt5 is required for the editor test")
     def test_editor_records_and_stops_from_shortcuts_then_copies_result(self):
         from PyQt5 import QtCore, QtWidgets

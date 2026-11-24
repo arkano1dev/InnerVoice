@@ -215,6 +215,18 @@ Press the shortcut once to record and again to stop. Use the editor's **Start / 
 
 For acceptance, with another Wayland app focused, record a five-second note with the shortcut and stop it with the same shortcut. Verify that text appears in the editor and can be copied into the other app. Repeat on your normal microphone and private network. Run the lightweight regression tests with `python3 -m unittest discover -s tests -v` from the checkout when `requests` is installed.
 
+#### Mesh VPN works on the workstation but times out in the container
+
+First run the HTTPS capabilities check from the workstation itself. Use the same Gateway URL and public certificate as setup. If that check reaches the Gateway (including an HTTP 401 without a token) while setup times out inside Docker, opt in to host networking for the desktop client on Linux:
+
+```bash
+export INNERVOICE_DESKTOP_HOST_NETWORK=1
+./bin/innervoice-desktop setup
+./bin/innervoice-desktop start
+```
+
+Set the same variable whenever you start or reconfigure the desktop client. The container shares the workstation's network namespace in this mode, including access to its network interfaces and local services. The client continues to verify the Gateway certificate and send its bearer token. No ports are published for the desktop service. The default launcher uses Compose's bridge network when the variable is omitted.
+
 ### Run directly on Ubuntu
 
 On a graphical Ubuntu workstation install Python, Qt, PortAudio and a microphone. The X11 mode also uses the AT-SPI bindings for insertion. The server and bot are independent. Run as the logged-in user:

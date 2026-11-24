@@ -24,6 +24,9 @@ export IV_DESKTOP_CONFIG=$HOME/.config/innervoice-desktop
 export IV_DESKTOP_STATE=$HOME/.local/state/innervoice-desktop
 
 compose=(docker compose --env-file /dev/null -p innervoice-desktop -f "$repo_dir/compose.desktop.yml")
+if [[ "${INNERVOICE_DESKTOP_HOST_NETWORK:-0}" == 1 ]]; then
+    compose+=(-f "$repo_dir/compose.desktop.host-network.yml")
+fi
 if [[ "$action" == setup || "$action" == start ]]; then
     if [[ "${XDG_SESSION_TYPE:-}" != wayland || ! -S "$IV_DESKTOP_WAYLAND_SOCKET" ]]; then
         echo "Run this from your local Wayland desktop session. Display socket: $IV_DESKTOP_WAYLAND_SOCKET" >&2
