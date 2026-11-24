@@ -1,8 +1,9 @@
 FROM alpine:3.24
-RUN apk add --no-cache ca-certificates python3 py3-qt5 qt5-qtwayland py3-requests \
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates python3 py3-qt5 qt5-qtwayland \
       py3-cffi portaudio alsa-plugins-pulse && \
     apk add --no-cache --virtual .installer py3-pip && \
     python3 -m pip install --no-cache-dir --no-deps --target=/opt/innervoice/lib sounddevice && \
+    python3 -m pip install --no-cache-dir --target=/opt/innervoice/lib "requests>=2.34.2" "urllib3>=2.8.0" && \
     apk del .installer && mkdir -p /opt/innervoice/bin && \
     ln -s /usr/bin/python3 /opt/innervoice/bin/python && \
     printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf
