@@ -7,8 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-service.txt /tmp/requirements-service.txt
-RUN python -c "import torch; print('torch==' + torch.__version__)" > /tmp/torch-constraint.txt && \
-    pip install --no-cache-dir -c /tmp/torch-constraint.txt -r /tmp/requirements-service.txt
+RUN python -c "from importlib.metadata import version; print('torch==' + version('torch'))" > /tmp/torch-constraint.txt && \
+    python -m pip install --no-cache-dir -c /tmp/torch-constraint.txt -r /tmp/requirements-service.txt
 
 WORKDIR /app
 COPY whisper_server.py /app/

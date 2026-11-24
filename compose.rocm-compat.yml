@@ -1,0 +1,6 @@
+# Opt-in compatibility with the earlier ROCm worker runtime.
+services:
+  whisper:
+    security_opt:
+      - seccomp:unconfined
+    ipc: host

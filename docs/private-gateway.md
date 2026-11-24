@@ -29,6 +29,35 @@ Use a new empty secret directory for certificate generation, or install an exist
 
 On a prepared host, `start --setup` combines the configuration wizard with startup. Plain start and restart are unattended. First activation replaces the old port mapping; schedule it only after recording the baseline. The worker has no published host port. Legacy routes are available inside Compose on gateway:9000. The private HTTPS port serves only the versioned API.
 
+## Check ROCm compatibility with the previous deployment
+
+A GPU reported by `/gpu-check` can still fail when PyTorch first allocates or
+runs on it. If Gunicorn replaces a worker with exit status 139, reproduce the
+failure with a small tensor before testing audio. If the previous deployment
+used a graphics target override, supply its effective
+`HSA_OVERRIDE_GFX_VERSION` in the operator shell or protected `.env`. If
+Docker cannot resolve the `render` group in the worker image, set
+`WHISPER_RENDER_GROUP` to the owning numeric GID of the intended
+`/dev/dri/renderD*` device on the host.
+
+For a Docker-only bot smoke test with the previous runtime settings, add
+`compose.rocm-compat.yml` explicitly. This overlay disables seccomp filtering for
+Whisper and shares the host IPC namespace. Use it only on a trusted host for
+compatibility testing. The private HTTPS CLI uses the standard worker
+configuration.
+
+```bash
+docker compose -f docker-compose.yml -f compose.rocm-compat.yml up -d --build
+docker compose -f docker-compose.yml -f compose.rocm-compat.yml exec -T whisper \
+  python -c 'import torch; print(torch.ones(8, device="cuda").tolist())'
+```
+
+Use the existing Compose project name when reusing its volumes, and reuse the
+previously validated ROCm base image by digest if the floating base tag has
+changed. After the tensor check succeeds, send two short notes to the bot and
+compare initial and warm response times. If GPU execution still fails, compare
+against the previous working image with the same operator settings.
+
 ## Gateway quickstart
 
 1. Prepare a Linux host with Python 3.11+, Docker Engine with Compose v2, the selected inference runtime, a private VLAN IPv4 address, and a TLS certificate that covers that address. Provision a verified local multilingual model and a worker image with a recorded digest or verified local image ID. See the [server provisioning guide](#provision-the-server) for the build, certificate, model checksum and Telegram bot token.

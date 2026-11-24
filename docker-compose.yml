@@ -20,7 +20,7 @@ services:
 
   whisper:
     # GPU (AMD ROCm). Do not apply low block I/O limits: model load needs normal disk I/O.
-    # If Whisper exits 139 or restarts, see docs/GPU-TROUBLESHOOTING.md
+    # See docs/private-gateway.md for ROCm compatibility checks.
     build:
       context: ./whisper
       dockerfile: Dockerfile
@@ -55,7 +55,7 @@ services:
       - /dev/dri
     group_add:
       - video
-      - render
+      - "${WHISPER_RENDER_GROUP:-render}"
 
   bot:
     build:
