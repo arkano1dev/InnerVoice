@@ -151,7 +151,7 @@ FIREWALL
   done
   result=0
   for image in "$COMPOSE_PROJECT_NAME-gateway" "$COMPOSE_PROJECT_NAME-bot"; do
-    "$IV_TEST_SCANNER" "docker:$image" --only-fixed --fail-on high || result=1
+    "$IV_TEST_SCANNER" "docker:$image" --fail-on high || result=1
   done
   exit "$result"
 fi
