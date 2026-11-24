@@ -29,6 +29,15 @@ Run `./bin/innervoice` from the candidate checkout with one of these commands.
 
 The Gateway accepts authenticated audio jobs, tracks progress, supports retries with an idempotency key and serves recoverable recording sessions. The agent provider converts an incoming voice note to text for the agent. The desktop client records audio and retains local state for recovery. See the [operator guide](docs/private-gateway.md) for provisioning, client installation, direct smoke checks, benchmark criteria and rollback.
 
+### Acceptance record · 2026-11-24
+
+| Scope | Recorded evidence | Remaining check |
+| --- | --- | --- |
+| Baseline and stages 1–3 | Gateway, durable job store, worker profiles, provider adapter and CLI present at `cfdf7cb`. | Verify clean installation, provider configuration, restart recovery, retention and existing bot behavior on the target. |
+| Stage 4 · Gateway | Smoke client and operator runbook present. | Record direct smoke first, then Telegram delivery, a one-hour restart case, latency, quality, peak resources and service rollback. |
+| Stage 5 · Ubuntu | Desktop capture, session handling and editing code present. | Exercise hotkey, microphone, recovery and insertion into the original window in a real graphical session. |
+| Public branding | Arkano credits and project support details restored. | Candidate remains on the refactor branch pending acceptance. |
+
 ## Quick Start
 
 Run all commands from the **project root** (directory that contains `docker-compose.yml`).
@@ -240,13 +249,7 @@ The performance of Inervoice depends on the Whisper model variant selected. See 
 ## Customization & Contributing
 
 - **Change Model Variant:**
-  Modify the following line in `bot.py` to use a different Whisper model:
-  
-  ```python
-  model = whisper.load_model("medium")
-  ```
-  
-  Replace `"medium"` with `"tiny"`, `"base"`, `"small"`, or `"large"`.
+  For the candidate, provision matching model weights and checksum, update the engine profile with `config set`, validate it, then use `restart`. For the legacy worker, configure `WHISPER_MODEL` in Compose.
 
 - **Contributions:**
   Contributions are welcome! Please open an issue or submit a pull request for improvements.
