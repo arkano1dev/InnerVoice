@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -156,6 +157,40 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertIn(override, host.splitlines())
             self.assertEqual(host.splitlines()[-3:], ["ps", "-a", "desktop"])
 
+    def test_pause_preview_and_resume_preserve_samples(self):
+        stop, pause = threading.Event(), threading.Event()
+        events = queue.Queue()
+        device = MagicMock()
+        mic = device.RawInputStream.return_value.__enter__.return_value
+        first, second = b"\x01\x00" * 4, b"\x02\x00" * 3
+
+        def read(_):
+            if mic.read.call_count == 1:
+                pause.set()
+                return first, False
+            stop.set()
+            return second, False
+
+        mic.read.side_effect = read
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, sounddevice=device):
+            directory = Path(tmp)
+            worker = threading.Thread(target=desktop.capture, args=(directory, stop, events, "", pause))
+            worker.start()
+            try:
+                while events.get(timeout=2)[0] != "paused":
+                    pass
+                self.assertEqual((directory / "000.raw").read_bytes(), first)
+                desktop.play_audio(directory, threading.Event(), events)
+                out = device.RawOutputStream.return_value.__enter__.return_value
+                out.write.assert_called_once_with(first)
+                pause.clear()
+                worker.join(2)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual((directory / "000.raw").read_bytes(), first + second)
+            finally:
+                stop.set()
+                worker.join(2)
+
     @unittest.skipUnless(importlib.util.find_spec("PyQt5"), "PyQt5 is required for the editor test")
     def test_editor_records_and_stops_from_shortcuts_then_copies_result(self):
         from PyQt5 import QtCore, QtWidgets
@@ -164,10 +199,17 @@ class WaylandDesktopTests(unittest.TestCase):
             home = Path(directory)
             config = home / "settings.json"
             config.write_text('{"microphone": ""}')
+            archived = home / "previous"
+            archived.mkdir()
+            metadata = archived / "editor.json"
+            metadata.write_text('{"text":"Previous take","applied":1,"ready":true}')
+            os.utime(metadata, (1, 1))
+            (archived / "000.raw").write_bytes(b"\x01\x00" * 8)
             runtime = home / "runtime"
             runtime.mkdir(mode=0o700)
 
-            def capture(_, stop, events, __):
+            def capture(directory, stop, events, device, pause):
+                (directory / "000.raw").write_bytes(b"\x01\x00" * 8)
                 stop.wait(2)
                 events.put(("stopped", None))
 
@@ -198,18 +240,18 @@ class WaylandDesktopTests(unittest.TestCase):
                         observed["startup"] = widget.isVisible()
                         observed["ordinary"] = (
                             widget.windowType() == QtCore.Qt.Window
-                            and not widget.windowFlags() & (QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+                            and not widget.windowFlags() & QtCore.Qt.WindowStaysOnTopHint
                         )
                     if editor is not None and not observed.get("retried"):
                         labels = [label.text() for label in widget.findChildren(QtWidgets.QLabel)]
                         if "Synthetic gateway failure" in labels:
                             observed["retried"] = True
-                            button = next(b for b in widget.findChildren(QtWidgets.QPushButton) if b.text() == "Record")
+                            button = next(b for b in widget.findChildren(QtWidgets.QPushButton) if b.accessibleName() == "Record")
                             button.click()
                             button.click()
                     if editor is None or editor.toPlainText() != "Test note":
                         continue
-                    copy = next(button for button in widget.findChildren(QtWidgets.QPushButton) if button.text() == "Copy")
+                    copy = next(button for button in widget.findChildren(QtWidgets.QPushButton) if button.accessibleName() == "Copy")
                     observed["auto"] = app.clipboard().text()
                     app.sendEvent(editor.viewport(), QtCore.QEvent(QtCore.QEvent.Enter))
                     def check_after_copy_delay():
@@ -218,6 +260,17 @@ class WaylandDesktopTests(unittest.TestCase):
                         copy.click()
                         observed["clipboard"] = app.clipboard().text()
                         observed["after_copy"] = widget.isVisible() and not widget.isMinimized()
+                        history = next(b.menu() for b in widget.findChildren(QtWidgets.QPushButton)
+                                       if b.accessibleName() == "Local recording history")
+                        history.aboutToShow.emit()
+                        previous = next((a for a in history.actions() if "Previous take" in a.text()), None)
+                        if previous:
+                            previous.trigger()
+                            observed["history"] = editor.toPlainText()
+                            observed["playable"] = any(
+                                b.isVisible() and b.accessibleName() == "Play recording"
+                                for b in widget.findChildren(QtWidgets.QPushButton)
+                            )
                         app.quit()
                     QtCore.QTimer.singleShot(2500, check_after_copy_delay)
                     return
@@ -242,7 +295,11 @@ class WaylandDesktopTests(unittest.TestCase):
             for condition in ("startup", "ordinary", "after_auto", "after_copy"):
                 self.assertTrue(observed.get(condition), condition)
             self.assertEqual(observed.get("clipboard"), "Edited note")
-            record = json.loads((home / (home / "current").read_text() / "editor.json").read_text())
+            self.assertEqual(observed.get("history"), "Previous take")
+            self.assertTrue(observed.get("playable"))
+            saved = attempts[-1]
+            self.assertTrue((saved / "000.raw").is_file())
+            record = json.loads((saved / "editor.json").read_text())
             self.assertEqual(record["text"], "Edited note")
             self.assertTrue(record["ready"])
             self.assertEqual(record["applied"], 1)
