@@ -29,6 +29,7 @@ _model = None
 _model_load_error = None
 _last_used_monotonic = None
 _model_lock = threading.Lock()
+_inference_slot = threading.Lock()
 
 
 def _probe_gpu():
@@ -166,7 +167,20 @@ def _gpu_cache_clear():
 
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
-    """Transcribe or translate audio. Accepts audio file + optional params: language, task, return_segments."""
+    """Claim the single model slot before accepting an inference request."""
+    global _last_used_monotonic
+    if not _inference_slot.acquire(blocking=False):
+        return jsonify(error="gpu_busy", message="Whisper is processing audio. Try again when free."), 503
+    try:
+        return _transcribe()
+    finally:
+        if _model is not None:
+            _last_used_monotonic = time.monotonic()
+        _inference_slot.release()
+
+
+def _transcribe():
+    """Accept an audio file and legacy task, language and timestamp options."""
     if "audio" not in request.files:
         return jsonify({"error": "No audio file"}), 400
 
@@ -241,7 +255,7 @@ def transcribe():
 def can_transcribe():
     """Check if GPU has enough free VRAM to accept a transcribe request (without loading the model).
     Bot uses this to know when to process the pending queue."""
-    if check_vram_available():
+    if not _inference_slot.locked() and check_vram_available():
         return jsonify({"can_transcribe": True}), 200
     return (
         jsonify({"can_transcribe": False, "message": "GPU/VRAM busy. Try again when free."}),
@@ -297,7 +311,9 @@ def _unload_model_if_idle():
             if idle_for < IDLE_UNLOAD_SECONDS:
                 continue
 
-            with _model_lock:
+            if not _inference_slot.acquire(blocking=False):
+                continue
+            try:
                 if _model is None:
                     continue
                 if _last_used_monotonic is not None and (time.monotonic() - _last_used_monotonic) < IDLE_UNLOAD_SECONDS:
@@ -318,6 +334,8 @@ def _unload_model_if_idle():
                     logger.info("Whisper model successfully unloaded due to idle timeout")
                 except Exception as e:
                     logger.warning("Error while unloading idle Whisper model: %s", e)
+            finally:
+                _inference_slot.release()
         except Exception as e:
             logger.warning("Idle-unload watcher loop error: %s", e)
 
@@ -342,8 +360,8 @@ def _start_idle_unload_thread():
 
 
 # Start background housekeeping when the module is imported (works for Gunicorn and Flask dev server)
-_start_idle_unload_thread()
 _preload_model()
+_start_idle_unload_thread()
 
 
 if __name__ == "__main__":

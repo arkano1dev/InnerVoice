@@ -35,3 +35,23 @@ ss -ltn 'sport = :9000'
 ```
 
 At the reference checkout the service list is `bot` and `whisper`. On the live host, record the port owner and callers, VLAN address and certificate identity, image digest, live profile, ROCm and Torch versions, disk headroom, model cache and existing volume names. Keep the existing deployment and image available for rollback. Use the same synthetic note in fast and combined modes and record progress, timestamps and busy behavior. Include speech just after 30 seconds in a fixture long enough to cross the 1 MiB split threshold.
+
+## Stage 1 increment: internal compatibility listener
+
+Compose now routes the existing bot to `http://gateway:9000`. The Gateway serves the four legacy routes on the Compose network. Only the Gateway and Whisper share InferenceNet. Neither service publishes a host port in this increment. The Gateway accepts one legacy inference request at a time with a 128 MiB HTTP body ceiling and returns the legacy busy shape at saturation. The worker independently rejects concurrent inference and shares its slot with idle unloading. The health path can respond through separate request threads.
+
+The model environment, cache mount, segmentation and bot source are unchanged. InferenceNet is a dedicated bridge with egress because the incumbent worker can still download missing weights. Offline weight provisioning, authenticated VLAN HTTPS, the two-lane scheduler and versioned jobs are pending. This increment is a reviewable source checkpoint, not a Release A cutover.
+
+Pending operator checks for this increment, when explicitly evaluating it on the target host:
+
+```bash
+docker compose config --quiet
+docker compose config --services
+docker compose exec -T bot python -c 'from urllib.request import urlopen; print(urlopen("http://gateway:9000/health", timeout=5).read().decode())'
+docker compose port whisper 9000
+docker compose port gateway 9000
+```
+
+With the candidate running, expect services `bot`, `gateway` and `whisper`, a healthy response naming the configured model, and no published port from the last two commands. During a long note, query health and check busy handling from a second caller. Repeat the baseline bot modes and segment-boundary fixture. Release A validation starts with the direct HTTPS smoke test once that listener and job API exist.
+
+Before any rollout, record the baseline commit and retain the prior image, Compose project name, volume paths and host-port ownership. To revert this increment if it was started, run `docker compose stop gateway` from the candidate checkout. Return to the recorded baseline checkout, preserving its environment and Compose project name, and run `docker compose up -d --force-recreate whisper bot` using the recorded prior images. Confirm the previous host binding and bot health. Preserve all named volumes.

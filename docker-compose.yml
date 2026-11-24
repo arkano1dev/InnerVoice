@@ -2,7 +2,22 @@ networks:
   TelegramNet:
     driver: bridge
 
+  InferenceNet:
+    driver: bridge
+
 services:
+  gateway:
+    build:
+      context: ./gateway
+    restart: unless-stopped
+    depends_on:
+      - whisper
+    networks:
+      - TelegramNet
+      - InferenceNet
+    environment:
+      - WHISPER_WORKER_URL=http://whisper:9000
+
   whisper:
     # GPU (AMD ROCm). Do not apply low block I/O limits: model load needs normal disk I/O.
     # If Whisper exits 139 or restarts, see docs/GPU-TROUBLESHOOTING.md
@@ -12,9 +27,7 @@ services:
     container_name: innervoice-whisper
     restart: unless-stopped
     networks:
-      - TelegramNet
-    ports:
-      - "9000:9000"
+      - InferenceNet
     volumes:
       - whisper_cache:/root/.cache
     environment:
@@ -54,7 +67,7 @@ services:
     container_name: innervoice-bot
     restart: unless-stopped
     depends_on:
-      - whisper
+      - gateway
     networks:
       - TelegramNet
     volumes:
@@ -62,7 +75,7 @@ services:
       - audio_temp:/app/audios
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
-      - WHISPER_API_URL=http://whisper:9000
+      - WHISPER_API_URL=http://gateway:9000
       - TZ=UTC
     deploy:
       resources:

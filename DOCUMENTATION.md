@@ -58,7 +58,7 @@ InnerVoice runs as **two separate containers** on the `TelegramNet` network:
 
 - **Whisper container**: Uses model from `WHISPER_MODEL` (default in compose: **medium**). **Lazy-loads** on first transcription so the server binds to port 9000 immediately. Exposes `/transcribe`, `/health`, `/gpu-check`. Runs on **AMD GPU via ROCm** (image: `rocm/pytorch:latest`) with Gunicorn. Compose uses AMD-recommended options: `seccomp=unconfined`, `SYS_PTRACE`, `ipc=host`, `shm_size: 2g`, `/dev/kfd`, `/dev/dri`, `video` and `render` groups.
 - **Bot container**: Receives voice from Telegram, converts OGG→WAV with ffmpeg, sends WAV to Whisper API via HTTP. Lightweight, no GPU.
-- **Network**: Both join `TelegramNet`; bot reaches Whisper at `http://whisper:9000`.
+- **Network**: The bot reaches the compatibility Gateway on `TelegramNet` at `http://gateway:9000`. The Gateway connects to Whisper on the separate `InferenceNet` bridge.
 
 ### Deploy Commands
 
@@ -116,7 +116,7 @@ To use a different GPU (e.g. eGPU on device 1), set `ROCR_VISIBLE_DEVICES=1` (or
 
 ### Reusing Whisper
 
-The Whisper container can be used by other apps: it exposes `http://whisper:9000` (or `localhost:9000` if port is published) with:
+The compatibility Gateway serves the following legacy paths at `http://gateway:9000` inside `TelegramNet`. The current Compose candidate has no host-published endpoint. See the [refactor baseline and operator checks](docs/refactor-baseline.md) for the rollout status.
 
 - `POST /transcribe` – multipart form: `audio` (WAV), optional `language`, `task` (transcribe/translate), `return_segments`. Model is loaded on first request (lazy).
 - `GET /health` – `status`, `model`; `vram_used_mb` / `vram_total_mb` only after the model has been loaded
@@ -530,7 +530,7 @@ Quick mode toggle:
 - **Whisper API**: Gunicorn + Flask with OpenAI Whisper (Medium, ROCm) – runs in `whisper` container
 - **Audio Processing**: FFmpeg in bot (OGG→WAV), then HTTP POST to Whisper
 - **Token Counting**: tiktoken
-- **Network**: Both on `TelegramNet`; bot calls `http://whisper:9000`
+- **Network**: Bot calls `http://gateway:9000` on `TelegramNet`; Gateway calls Whisper on `InferenceNet`
 
 **Processing Flow**:
 1. User sends voice → Telegram

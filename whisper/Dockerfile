@@ -16,4 +16,4 @@ ENV WHISPER_MODEL=medium
 ENV PYTHONUNBUFFERED=1
 
 # Use Gunicorn for production WSGI (Flask dev server is single-threaded and slower)
-CMD ["gunicorn", "--bind", "0.0.0.0:9000", "--workers", "1", "--threads", "1", "--timeout", "600", "whisper_server:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:9000", "--workers", "1", "--threads", "4", "--timeout", "600", "whisper_server:app"]
