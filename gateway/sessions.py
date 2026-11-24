@@ -31,8 +31,6 @@ def routes(api):
         if not 1<=len(key)<=128:
             return jobs.failure("invalid_key",400)
         with jobs.admission,jobs.database() as db:
-            if jobs.paused():
-                return jobs.failure("admission_disabled",503)
             old=db.execute("SELECT id,state,digest FROM jobs WHERE replay=? AND owner=?",(key,owner)).fetchone()
             if old:
                 if old["digest"]!="capture":
@@ -40,6 +38,8 @@ def routes(api):
                 if old["state"]=="expired":
                     return jobs.failure("expired",410)
                 return {"session_id":old["id"]},200
+            if jobs.paused():
+                return jobs.failure("admission_disabled",503)
             counts=db.execute("SELECT count(*),sum(owner=?) FROM jobs WHERE finished IS NULL",(owner,)).fetchone()
             if (counts[1] or 0)>=jobs.setting("jobs_per_owner",4) or counts[0]>=jobs.setting("jobs",8):
                 return jobs.failure("queue_capacity",429 if (counts[1] or 0)>=jobs.setting("jobs_per_owner",4) else 503)
@@ -115,7 +115,7 @@ def routes(api):
         if not isinstance(body, dict):
             return jobs.failure("invalid_last_index", 400)
         last=body.get("last_index")
-        if type(last) is not int or not 0<=last<120:
+        if type(last) is not int or not 0<=last<(jobs.PCM_LIMIT+jobs.BLOCK-1)//jobs.BLOCK:
             return jobs.failure("invalid_last_index",400)
         with jobs.admission,jobs.database() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -124,8 +124,12 @@ def routes(api):
                 return jobs.failure("unknown_session",404)
             if row["state"]=="expired":
                 return jobs.failure("expired",410)
-            if row["closed"] and row["last"]!=last:
-                return jobs.failure("finalize_conflict",409)
+            if row["closed"]:
+                if row["last"]!=last:
+                    return jobs.failure("finalize_conflict",409)
+                return jobs.accepted(row)
+            if row["finished"]:
+                return jobs.failure("session_closed",409)
             have={r[0] for r in db.execute("SELECT idx FROM fragments WHERE job=?",(ident,))}
             missing=sorted(set(range(last+1))-have)
             if missing:

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Ubuntu graphical client. Capture, network, and UI use independent threads."""
-import argparse
 import io
 import json
 import os
@@ -12,6 +11,8 @@ import sys
 import threading
 import time
 import wave
+
+import requests
 
 from provider import Client, atomic
 
@@ -63,49 +64,69 @@ def capture(directory,stop,events,device):
         events.put(("stopped",None))
 
 
-def network(cfg,directory,events,finished):
-    client=Client(cfg)
-    key=directory.name
+def network(cfg, directory, key, events, finished):
+    try:
+        client = Client(cfg)
+    except (OSError, ValueError, KeyError):
+        events.put(("retry", ("Check the desktop connection settings and credential file.", False)))
+        return
+
+    path = None
     while True:
         try:
-            session=client.call("POST","/v1/sessions",headers={"Idempotency-Key":key})["session_id"]
-            path="/v1/sessions/"+session
-            progress=client.call("GET",path)
-            files=sorted(directory.glob("*.raw"))
-            done=finished.is_set()
-            ready=[p for p in files if p.stat().st_size==BLOCK or (done and p.stat().st_size>=2)]
-            for p in ready:
-                idx=int(p.stem)
-                if idx in progress["received"]:
+            files = sorted(directory.glob("*.raw"))
+            done = finished.is_set()
+            ready = [p for p in files if p.stat().st_size == BLOCK or (done and p.stat().st_size >= 2)]
+            if path is None and not ready:
+                if done:
+                    events.put(("ready", "Empty recording"))
+                    return
+                finished.wait(1)
+                continue
+            if path is None:
+                session = client.call("POST", "/v1/sessions", headers={"Idempotency-Key": key})
+                path = "/v1/sessions/" + session["session_id"]
+            progress = client.call("GET", path)
+            events.put(("segments", progress["segments"]))
+            if progress["state"] == "succeeded":
+                events.put(("ready", "Ready"))
+                return
+            if progress["state"] == "failed":
+                events.put(("retry", ("Gateway could not finish this capture. Retry to reprocess the saved audio.", True)))
+                return
+            received = set(progress["received"])
+            for fragment in ready:
+                index = int(fragment.stem)
+                if index in received:
                     continue
-                buf=io.BytesIO()
-                with wave.open(buf,"wb") as w:
-                    w.setparams((1,2,16000,0,"NONE","not compressed"))
-                    data=p.read_bytes()
-                    w.writeframes(data[:len(data)//2*2])
-                client.call("PUT",path+f"/fragments/{idx}",data=buf.getvalue(),headers={"Content-Type":"audio/wav"})
-            events.put(("segments",progress["segments"]))
-            if progress["state"]=="succeeded":
-                for p in files:
-                    p.unlink(missing_ok=True)
-                events.put(("ready","Ready"))
-                return
-            if done and not ready:
-                events.put(("ready","Empty recording"))
-                return
-            if done and not progress["closed"]:
-                client.call("POST",path+"/finalize",json={"last_index":int(ready[-1].stem)})
-            if progress["state"]=="failed":
-                events.put(("notice","Gateway reported a failed capture."))
-                return
+                with io.BytesIO() as buf:
+                    with wave.open(buf, "wb") as wav:
+                        wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                        data = fragment.read_bytes()
+                        wav.writeframes(data[:len(data) // 2 * 2])
+                    client.call("PUT", path + f"/fragments/{index}", data=buf.getvalue(),
+                                headers={"Content-Type": "audio/wav"})
+            if done and ready and not progress["closed"]:
+                client.call("POST", path + "/finalize", json={"last_index": int(ready[-1].stem)})
             time.sleep(1)
-        except Exception as error:
-            response=getattr(error,"response",None)
-            if response is not None and response.status_code in (400,401,404,409,410,413,415,422):
-                events.put(("notice","Gateway rejected capture: "+str(response.status_code)))
-                return
-            events.put(("notice","Gateway unavailable. Retrying saved fragments."))
+        except requests.HTTPError as error:
+            status = error.response.status_code
+            if status in (429, 502, 503, 504):
+                events.put(("notice", "Gateway busy or unavailable. Retrying saved fragments."))
+                time.sleep(3)
+                continue
+            restart = status == 410 or (status == 404 and path is not None)
+            events.put(("retry", (f"Gateway returned HTTP {status}. Saved audio is available to retry.", restart)))
+            return
+        except (requests.exceptions.SSLError, requests.exceptions.InvalidURL, ValueError, KeyError):
+            events.put(("retry", ("Check the Gateway endpoint, TLS trust and configuration.", False)))
+            return
+        except (requests.Timeout, requests.ConnectionError):
+            events.put(("notice", "Connection interrupted. Retrying saved fragments."))
             time.sleep(3)
+        except (requests.RequestException, OSError):
+            events.put(("retry", ("Could not sync saved audio. Check the client state and retry.", False)))
+            return
 
 
 def focused():
@@ -150,6 +171,8 @@ def graphical():
     stop=threading.Event()
     finished=threading.Event()
     working=False
+    transfer_active = False
+    replace_session = False
 
     def save():
         if directory:
@@ -163,7 +186,22 @@ def graphical():
     editor.bind("<<Modified>>",changed)
 
     def transfer():
-        threading.Thread(target=network,args=(cfg,directory,events,finished),daemon=True).start()
+        nonlocal transfer_active
+        transfer_active = True
+        retry_button.configure(state="disabled")
+        key = state.get("session_key", directory.name)
+        threading.Thread(target=network, args=(cfg, directory, key, events, finished), daemon=True).start()
+
+    def retry():
+        nonlocal replace_session
+        if transfer_active or not finished.is_set() or not directory or state.get("ready"):
+            return
+        if replace_session:
+            state["session_key"] = secrets.token_hex(16)
+            save()
+            replace_session = False
+        status.set("Syncing saved audio")
+        transfer()
 
     def insert():
         if not directory or not state.get("ready") or state.get("intent") or target is None:
@@ -209,14 +247,17 @@ def graphical():
         transfer()
 
     def poll():
-        nonlocal working
+        nonlocal working, transfer_active, replace_session
         while not events.empty():
             kind,value=events.get()
             if kind=="toggle":
                 toggle()
             elif kind=="stopped":
                 finished.set()
-                status.set("Processing saved audio")
+                if transfer_active:
+                    status.set("Processing saved audio")
+                else:
+                    retry_button.configure(state="normal")
             elif kind=="segments":
                 for part in value:
                     if part["index"]==state["applied"]:
@@ -224,11 +265,24 @@ def graphical():
                             editor.insert("end-1c",(" " if editor.get("1.0","end-1c") else "")+part["text"])
                         state["applied"]+=1
                         save()
+            elif kind=="retry":
+                transfer_active = False
+                message, replace_session = value
+                status.set(message)
+                if finished.is_set():
+                    retry_button.configure(state="normal")
             elif kind=="ready":
+                transfer_active = False
                 working=False
                 state["ready"]=True
                 save()
                 status.set(value)
+                retry_button.configure(state="disabled")
+                for fragment in directory.glob("*.raw"):
+                    try:
+                        fragment.unlink(missing_ok=True)
+                    except OSError:
+                        status.set("Text saved. Local audio cleanup is pending.")
                 insert()
             else:
                 status.set(value)
@@ -239,6 +293,8 @@ def graphical():
         root.clipboard_append(editor.get("1.0","end-1c"))
     tk.Button(root,text="Start / Stop",command=toggle).pack(side="left")
     tk.Button(root,text="Copy",command=copy).pack(side="right")
+    retry_button = tk.Button(root, text="Retry sync", command=retry, state="disabled")
+    retry_button.pack(side="left")
     if pointer.exists():
         directory=HOME/pointer.read_text()
         state=json.loads((directory/"editor.json").read_bytes())

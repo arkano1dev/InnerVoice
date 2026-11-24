@@ -1,5 +1,7 @@
 # InnerVoice Bot - Complete Documentation
 
+> For the current private Gateway release, start with the [project README](README.md) and [operator guide](docs/private-gateway.md). This document also preserves earlier standalone bot deployment instructions.
+
 **Version**: 3.0.0  
 **Last Updated**: February 2025  
 **Status**: Production Ready ✅
