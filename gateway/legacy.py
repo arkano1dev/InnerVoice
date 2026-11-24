@@ -1,6 +1,7 @@
 """Internal compatibility listener for the existing Compose bot."""
 
 import os
+import hmac
 from pathlib import Path
 from contextlib import contextmanager
 from threading import BoundedSemaphore, Condition
@@ -9,7 +10,9 @@ import requests
 from flask import Flask, Response, jsonify, request
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 128 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
+upstream_client = requests.Session()
+upstream_client.trust_env = False
 worker_url = os.environ.get("WHISPER_WORKER_URL", "http://whisper:9000").rstrip("/")
 legacy_slot = BoundedSemaphore(1)
 
@@ -37,6 +40,14 @@ def inference_lane(lane):
             condition.notify_all()
 
 
+@app.before_request
+def authenticate_bot():
+    token = Path("/run/telegram/bearer").read_bytes().strip()
+    supplied = request.headers.get("Authorization", "").encode()
+    if not token or not hmac.compare_digest(supplied, b"Bearer " + token):
+        return jsonify(error="unauthorized"), 401
+
+
 def forward(path, *, timeout):
     headers = {}
     body = None
@@ -45,7 +56,7 @@ def forward(path, *, timeout):
         body = request.get_data(cache=False)
 
     try:
-        upstream = requests.request(
+        upstream = upstream_client.request(
             request.method,
             f"{worker_url}{path}",
             params=request.args,
@@ -69,7 +80,7 @@ def transcribe():
     if not legacy_slot.acquire(blocking=False):
         return jsonify(error="gpu_busy", message="Whisper is processing audio. Try again when free."), 503
     try:
-        if os.environ.get("PRIVATE_API")=="1" and (Path(os.environ.get("STATE_DIR","/state"))/"drain").exists():
+        if os.environ.get("ENABLE_JOBS") != "1" or (Path(os.environ.get("STATE_DIR","/state"))/"drain").exists():
             return jsonify(error="gpu_busy",message="Service draining"),503
         with inference_lane("legacy"):
             return forward("/transcribe", timeout=590)

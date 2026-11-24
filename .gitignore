@@ -38,3 +38,4 @@ client.toml
 network-mode
 editor.json
 control.sock
+gateway-bearer

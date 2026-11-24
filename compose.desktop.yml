@@ -26,8 +26,8 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: "${IV_DESKTOP_PULSE:?}"
-        target: /run/innervoice/pulse
+        source: "${IV_DESKTOP_PULSE:?}/native"
+        target: /run/innervoice/pulse/native
         read_only: true
         bind:
           create_host_path: false

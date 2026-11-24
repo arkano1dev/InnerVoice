@@ -32,7 +32,7 @@ MODELS = ("tiny", "base", "small", "medium", "large", "large-v1", "large-v2", "l
 PRIVATE_NETWORKS = tuple(ipaddress.IPv4Network(cidr) for cidr in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
 ))
-DEFAULT = {"deployment":{"version":1,"engine":ENGINES[0],"bind":"","allowed_networks":"","port":9000,"enable":False,
+DEFAULT = {"deployment":{"version":1,"engine":ENGINES[0],"bind":"","allowed_networks":"","port":9000,"enable":False,"telegram":False,
                          "data":str(HOME/"state"),"secrets":str(HOME/"secrets")},
            "limits":{"max_seconds":3600,"upload_mib":128,"quota_mib":1024,"free_floor_mib":64,"jobs":8,"jobs_per_owner":4,"uploads":2,"attempts":3},
            "retention":{"result_seconds":3600,"failed_seconds":86400,"tombstone_seconds":86400,"telemetry_days":30},
@@ -63,6 +63,7 @@ def serialize(cfg):
 def read(path):
     with path.open("rb") as stream:
         cfg=tomllib.load(stream)
+    cfg["deployment"].setdefault("telegram", False)
     cfg["bot.defaults"]=cfg.pop("bot")["defaults"]
     return cfg
 
@@ -257,8 +258,9 @@ def setup(cfg, engine=None):
     print("\n4/4  Review and save")
     print(f"  URL: https://{deployment['bind']}:{deployment['port']}")
     print(f"  Allowed clients: {deployment['allowed_networks']}")
-    print(f"  Worker: {image} ({image_id})")
-    print(f"  Model: {model} | New API jobs: {'enabled' if deployment['enable'] else 'disabled'}")
+    profile = cfg[engine]
+    print(f"  Worker: {profile['image']} ({profile['image_id']})")
+    print(f"  Model: {profile['model']} | New API jobs: {'enabled' if deployment['enable'] else 'disabled'}")
     if input("  Save this setup? [y/N]: ").strip().lower() not in ("y", "yes"):
         raise SystemExit("Setup cancelled. Settings were not saved.")
     secret_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -335,13 +337,19 @@ def env(cfg):
                 IV_PREVIOUS=str(p["previous_text"]).lower(),IV_COMPILE=str(p["compile"]).lower(),IV_IDLE=str(p["idle_seconds"]),
                 IV_ENGINE=d["engine"],IV_UID=str(os.getuid()),IV_GID=str(os.getgid()),
                 IV_BIND=d["bind"],IV_ALLOWED_NETWORKS=d["allowed_networks"],IV_PORT=str(d["port"]),IV_ENABLE=str(int(d["enable"])),
+                IV_BEARER_FILE=str(HOME/"telegram"/"gateway-bearer"),
+                IV_RAM_MIB=str(cfg["limits"]["quota_mib"]+cfg["limits"]["free_floor_mib"]),
                 IV_IMAGE=p["image"],IV_WEIGHTS=p["weights"],IV_MODEL=p["model"],IV_DIGEST=p["digest"],
+                IV_ACCESS_DIR=str(HOME/"gateway-access"),IV_SOCKET_DIR=str(HOME/"telegram-socket"),
                 IV_DATA=d["data"],IV_SECRETS=d["secrets"],IV_BOT=json.dumps(cfg["bot.defaults"]),
                 IV_REVISION=hashlib.sha256(json.dumps([p,d["engine"],cfg["validation"],"decoder-v1"],sort_keys=True).encode()).hexdigest())
 
 
 def compose(cfg,*args,capture=False):
-    return subprocess.run(["docker","compose","-f","docker-compose.yml","-f","compose.private.yml",*args],
+    files = ["-f","docker-compose.yml","-f","compose.private.yml"]
+    if cfg["deployment"].get("telegram"):
+        files += ["-f","compose.telegram.yml"]
+    return subprocess.run(["docker","compose",*files,*args],
                           cwd=REPO,env=env(cfg),check=True,capture_output=capture,text=True)
 
 
@@ -395,8 +403,24 @@ def check_clients(path):
 
 
 
+def publish_registry(source):
+    directory = HOME/"gateway-access"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    atomic(directory/"clients.json", source.read_bytes())
+
+
 def preflight(cfg):
     d=cfg["deployment"]
+    if os.getuid() == 0 or os.getgid() == 0:
+        raise ValueError("Use a non-root service account and group")
+    if len(Path("/proc/swaps").read_text().splitlines()) > 1:
+        raise ValueError("Disable swap on the Docker host before processing private audio")
+    if d.get("telegram"):
+        (HOME/"telegram-socket").mkdir(mode=0o700, exist_ok=True)
+        folder = HOME/"telegram"
+        folder.mkdir(mode=0o700, exist_ok=True)
+        if not (folder/"gateway-bearer").exists():
+            atomic(folder/"gateway-bearer", secrets.token_urlsafe(48).encode())
     p=cfg[d["engine"]]
     if not re.fullmatch(r".+@sha256:[0-9a-f]{64}",p["image"]) and not re.fullmatch(r"sha256:[0-9a-f]{64}",p["image_id"]):
         raise ValueError("Run ./bin/innervoice config setup to pin the worker image.")
@@ -415,7 +439,11 @@ def preflight(cfg):
     secret_dir = Path(d["secrets"])
     check_tls(secret_dir, d["bind"])
     check_clients(secret_dir/"clients.json")
-    Path(d["data"]).mkdir(mode=0o700,parents=True,exist_ok=True)
+    publish_registry(secret_dir/"clients.json")
+    state = Path(d["data"])
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if any(f.suffix in (".pcm", ".upload", ".part") for f in state.iterdir()):
+        raise ValueError("Earlier audio spool files exist. Drain the previous deployment and review its state before upgrading.")
 
 
 def snapshot(cfg,job=None):
@@ -512,6 +540,7 @@ def operate(args):
             raise ValueError("Each integration requires its own token")
         clients[args.identity]={"digest":digest, "scope":scope, "peer":peer}
         atomic(path,json.dumps(clients).encode())
+        publish_registry(path)
         return
     if args.engine:
         cfg["deployment"]["engine"]=args.engine
@@ -523,7 +552,7 @@ def operate(args):
         print("Checking the worker image, model weights and HTTPS configuration…", flush=True)
         preflight(cfg)
         # Complete candidate builds before interrupting an active service.
-        compose(cfg,"build","bot","gateway")
+        compose(cfg,"build", "gateway", *(["bot"] if cfg["deployment"]["telegram"] else []))
     if args.cmd in ("stop","restart") and ACTIVE.exists():
         data=Path(active["deployment"]["data"])
         drain=data/"drain"
@@ -539,15 +568,15 @@ def operate(args):
                 if time.monotonic()>until:
                     raise ValueError("Drain timed out")
                 time.sleep(1)
-            compose(active,"stop","bot","gateway","whisper")
+            compose(active,"stop")
         finally:
             drain.unlink(missing_ok=True)
     if args.cmd=="stop":
         return
-    compose(cfg,"up","-d","--no-build","--pull","never")
+    compose(cfg,"up","-d",*(["--force-recreate"] if args.cmd=="restart" else []),"--no-build","--pull","never","--remove-orphans")
     print("Waiting for the Gateway and Whisper to respond…", flush=True)
-    probe=("import requests; h=requests.get('http://127.0.0.1:9000/health',timeout=7).json(); "
-           "g=requests.get('http://127.0.0.1:9000/gpu-check',timeout=7).json(); "
+    probe=("import requests; h=requests.get('http://whisper:9000/health',timeout=7).json(); "
+           "g=requests.get('http://whisper:9000/gpu-check',timeout=7).json(); "
            "print(h['engine'],h['model'],h['profile'],g['gpu'].get('available',False))")
     expected=" ".join((cfg["deployment"]["engine"],cfg[cfg["deployment"]["engine"]]["model"],env(cfg)["IV_REVISION"],"True"))
     for _ in range(30):
@@ -562,7 +591,7 @@ def operate(args):
         except subprocess.CalledProcessError:
             pass
         time.sleep(2)
-    compose(cfg,"stop","bot","gateway","whisper")
+    compose(cfg,"stop")
     raise ValueError("Activation failed. Inspect 'docker compose logs --tail=80 gateway whisper'. Restore the previous settings before retrying.")
 
 

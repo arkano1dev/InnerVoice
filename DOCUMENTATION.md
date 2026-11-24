@@ -4,7 +4,7 @@
 
 **Version**: 3.0.0  
 **Last Updated**: February 2025  
-**Status**: Production Ready ✅
+**Scope**: Historical standalone bot reference. On the private Gateway branch use the [current deployment and privacy instructions](docs/private-gateway.md#server-audio-and-telegram).
 
 ---
 
@@ -1023,6 +1023,5 @@ Each message limited to 4096 characters (Telegram limit)
 
 **Version**: 2.1.0  
 **Last Updated**: November 14, 2025  
-**Status**: Production Ready ✅  
+**Scope**: Historical standalone bot reference. On the private Gateway branch use the [current deployment and privacy instructions](docs/private-gateway.md#server-audio-and-telegram).
 **Made with ❤️ by @arkano21**
-

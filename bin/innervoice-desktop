@@ -35,6 +35,7 @@ if [[ "$action" == shortcut ]]; then
 fi
 export IV_DESKTOP_UID=$(id -u)
 export IV_DESKTOP_GID=$(id -g)
+if [[ "$IV_DESKTOP_UID" == 0 || "$IV_DESKTOP_GID" == 0 ]]; then echo "Use your desktop account." >&2; exit 1; fi
 runtime_dir=${XDG_RUNTIME_DIR:-/run/user/$IV_DESKTOP_UID}
 display=${WAYLAND_DISPLAY:-wayland-0}
 case "$display" in

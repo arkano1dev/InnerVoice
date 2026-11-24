@@ -29,7 +29,9 @@ services:
       PROFILE_REVISION: "${IV_REVISION:?}"
     volumes:
       - "${IV_DATA:?}:/state"
-      - "${IV_SECRETS:?}:/run/innervoice:ro"
+      - "${IV_ACCESS_DIR:?}:/run/innervoice-access:ro"
+      - "${IV_SECRETS:?}/tls.crt:/run/innervoice/tls.crt:ro"
+      - "${IV_SECRETS:?}/tls.key:/run/innervoice/tls.key:ro"
   whisper:
     environment:
       PROFILE_REVISION: "${IV_REVISION:?}"
@@ -45,6 +47,3 @@ services:
     volumes:
       - "${IV_WEIGHTS:?}:/weights/model:ro"
     image: "${IV_IMAGE:?}"
-  bot:
-    environment:
-      INNERVOICE_BOT_DEFAULTS: "${IV_BOT:?}"

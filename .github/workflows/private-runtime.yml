@@ -1,0 +1,18 @@
+name: Private Docker runtime
+on:
+  push:
+    branches: [refactor/private-voice-gateway]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Test the private stack with synthetic audio
+        run: |
+          sudo swapoff -a
+          bash tests/docker_private_runtime.sh

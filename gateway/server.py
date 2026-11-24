@@ -33,10 +33,20 @@ def restrict_to_networks(app, setting):
 
 def main():
     os.umask(0o077)
-    internal = Server(("0.0.0.0",9000), legacy.app,numthreads=8)
+    if os.getuid() == 0 or os.getgid() == 0:
+        raise RuntimeError("The gateway requires a non-root identity")
+    with open("/proc/swaps") as swaps:
+        if len(swaps.readlines()) > 1:
+            raise RuntimeError("Disable swap on the Docker host")
+    with open("/proc/self/mountinfo") as mounts:
+        if not any(line.split()[4] == "/tmp" and line.split(" - ")[1].startswith("tmpfs ") for line in mounts):
+            raise RuntimeError("The server audio spool requires a tmpfs mount at /tmp")
+    telegram = os.environ.get("IV_TELEGRAM") == "1"
+    if telegram:
+        internal = Server("/run/telegram-socket/gateway.sock", legacy.app, numthreads=4)
+        internal.max_request_body_size = 8 * 1024**2
     if os.environ.get("PRIVATE_API") != "1":
-        internal.start()
-        return
+        raise RuntimeError("Start the private Gateway using bin/innervoice")
     private_app = restrict_to_networks(jobs.api, os.environ.get("IV_ALLOWED_NETWORKS", ""))
     jobs.ROOT.mkdir(mode=0o700,parents=True,exist_ok=True)
     with (jobs.ROOT / "gateway.lock").open("a") as lock:
@@ -57,9 +67,11 @@ def main():
         external.ssl_adapter = BuiltinSSLAdapter("/run/innervoice/tls.crt","/run/innervoice/tls.key")
         external.ssl_adapter.context.minimum_version = ssl.TLSVersion.TLSv1_2
         external.prepare()
-        internal.prepare()
+        if telegram:
+            internal.prepare()
         threading.Thread(target=jobs.run,daemon=True).start()
-        threading.Thread(target=internal.serve,daemon=True).start()
+        if telegram:
+            threading.Thread(target=internal.serve,daemon=True).start()
         external.serve()
 
 

@@ -1,5 +1,4 @@
 aiogram
-python-dotenv
 tiktoken
 requests==2.34.2
 aiohttp

@@ -37,6 +37,7 @@ PCM_LIMIT = setting("max_seconds",3600) * 32000
 BLOCK = 30 * 32000
 api.config.update(MAX_CONTENT_LENGTH=LIMIT + 65536, MAX_FORM_PARTS=3)
 ROOT = Path(os.environ.get("STATE_DIR", "/state"))
+AUDIO = Path("/tmp/innervoice-audio")
 PROFILE = os.environ.get("PROFILE_REVISION", "")
 admission = threading.Lock()
 rejection_lock = threading.Lock()
@@ -60,7 +61,8 @@ def database():
 
 def initialize():
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
-    tempfile.tempdir=str(ROOT)
+    AUDIO.mkdir(mode=0o700, exist_ok=True)
+    tempfile.tempdir=str(AUDIO)
     with database() as db:
         db.execute("PRAGMA journal_mode=WAL")
         if db.execute("PRAGMA user_version").fetchone()[0] not in (0,1):
@@ -79,9 +81,18 @@ def initialize():
         sessions.schema(db)
         telemetry.schema(db)
         db.execute("UPDATE jobs SET state='queued' WHERE state='processing'")
+        # Docker discards the RAM spool when the container stops.
+        for row in db.execute("SELECT id,digest,done,total FROM jobs WHERE finished IS NULL").fetchall():
+            if row["digest"] == "capture":
+                required = [AUDIO / f"{row['id']}.{r[0]}.pcm" for r in db.execute(
+                    "SELECT idx FROM fragments WHERE job=? AND idx>=?", (row["id"], row["done"]))]
+            else:
+                required = [AUDIO / (row["id"] + ".pcm")]
+            if any(not path.is_file() for path in required):
+                finish_error(db, row["id"], "input_missing")
         known = {row[0] for row in db.execute("SELECT id FROM jobs")}
         known.update(f"{r[0]}.{r[1]}" for r in db.execute("SELECT job,idx FROM fragments"))
-    for file in ROOT.iterdir():
+    for file in AUDIO.iterdir():
         if file.suffix in {".upload", ".part"} or (file.suffix == ".pcm" and file.stem not in known):
             file.unlink()
 
@@ -100,7 +111,7 @@ def authenticate():
     secret = request.headers.get("Authorization", "").removeprefix("Bearer ")
     if request.headers.get("Authorization") != "Bearer " + secret or not secret:
         return failure("unauthorized", 401)
-    with open("/run/innervoice/clients.json") as stream:
+    with open("/run/innervoice-access/clients.json") as stream:
         clients = json.load(stream)
     owner, scope, error = authorize(clients, secret, request.remote_addr, request.path)
     if error:
@@ -115,8 +126,8 @@ def no_cache(response):
     return response
 
 
-def sync_dir():
-    fd = os.open(ROOT, os.O_DIRECTORY)
+def sync_dir(directory=ROOT):
+    fd = os.open(directory, os.O_DIRECTORY)
     try:
         os.fsync(fd)
     finally:
@@ -132,8 +143,8 @@ def paused():
 
 
 def space_available(budget):
-    used = sum(p.stat().st_size for p in ROOT.glob("*.pcm"))
-    return used + reserved + budget <= setting("quota_mib",1024)*1024**2 and shutil.disk_usage(ROOT).free >= reserved + budget + setting("free_floor_mib",64)*1024**2
+    used = sum(p.stat().st_size for p in AUDIO.glob("*.pcm"))
+    return used + reserved + budget <= setting("quota_mib",1024)*1024**2 and shutil.disk_usage(AUDIO).free >= reserved + budget + setting("free_floor_mib",64)*1024**2
 
 
 def replay_existing(row):
@@ -209,8 +220,8 @@ def submit():
         return replay_existing(old)
     ident = uuid.uuid4().hex
     started=time.time()
-    source = ROOT / (ident + ".upload")
-    pcm = ROOT / (ident + ".part")
+    source = AUDIO / (ident + ".upload")
+    pcm = AUDIO / (ident + ".part")
     try:
         if set(request.files) != {"audio"} or len(request.files.getlist("audio")) != 1 or request.form:
             return failure("invalid_fields", 400)
@@ -253,8 +264,8 @@ def submit():
                 return failure("client_capacity",429)
             if counts[0] >= setting("jobs",8):
                 return failure("queue_capacity",503)
-            pcm.rename(ROOT / (ident + ".pcm"))
-            sync_dir()
+            pcm.rename(AUDIO / (ident + ".pcm"))
+            sync_dir(AUDIO)
             db.execute("INSERT INTO jobs(id,owner,replay,digest,profile,state,created,total) VALUES(?,?,?,?,?,'queued',?,?)",
                        (ident,owner,key,signature,PROFILE,time.time(),math.ceil(size/BLOCK)))
             db.execute("INSERT INTO performance(id,owner,profile,created,state,total,audio_seconds,admission_seconds,decode_seconds) VALUES(?,?,?,?,'queued',?,?,?,?)",
@@ -303,7 +314,7 @@ def finish_error(db, ident, reason):
 def process(row):
     ident = row["id"]
     capture = row["digest"] == "capture"
-    path = ROOT / (f"{ident}.{row['done']}.pcm" if capture else ident + ".pcm")
+    path = AUDIO / (f"{ident}.{row['done']}.pcm" if capture else ident + ".pcm")
     if not path.exists():
         with database() as db:
             finish_error(db,ident,"input_missing")
@@ -319,7 +330,7 @@ def process(row):
         segment=""
     else:
         with legacy.inference_lane("jobs"):
-            ready = requests.get(legacy.worker_url+"/can-transcribe",timeout=(2,7))
+            ready = legacy.upstream_client.get(legacy.worker_url+"/can-transcribe",allow_redirects=False,timeout=(2,7))
             if ready.status_code==503:
                 # Busy after an interrupted response is occupancy, not a new inference failure.
                 with database() as db:
@@ -329,7 +340,7 @@ def process(row):
             attempt=secrets.token_hex(16)
             tags={"X-Dispatch-Job":ident,"X-Dispatch-Index":str(row["done"]),"X-Dispatch-Token":attempt,"X-Dispatch-Profile":PROFILE}
             start=time.monotonic()
-            response = requests.post(legacy.worker_url+"/transcribe",files={"audio":("segment.wav",block.getvalue(),"audio/wav")},
+            response = legacy.upstream_client.post(legacy.worker_url+"/transcribe",allow_redirects=False,files={"audio":("segment.wav",block.getvalue(),"audio/wav")},
                                      data={"task":"translate"},headers=tags,timeout=(2,590))
             response.raise_for_status()
             if any(response.headers.get(k)!=v for k,v in tags.items()):
@@ -381,8 +392,8 @@ def maintain():
         db.execute("INSERT OR REPLACE INTO heartbeat VALUES(1,?,?,?)",(now,PROFILE,int(not paused())))
         db.execute("DELETE FROM performance WHERE finished<?",(now-setting("telemetry_days",30)*86400,))
         db.execute("UPDATE jobs SET state='failed',finished=?,error='capture_expired' WHERE digest='capture' AND finished IS NULL AND created<?",(now,now-setting("failed_seconds",86400)))
-        for row in db.execute("SELECT id FROM jobs WHERE state='succeeded' OR finished < ?",(now-setting("failed_seconds",86400),)):
-            for path in ROOT.glob(row[0]+"*.pcm"):
+        for row in db.execute("SELECT id FROM jobs WHERE finished IS NOT NULL"):
+            for path in AUDIO.glob(row[0]+"*.pcm"):
                 try:
                     path.unlink(missing_ok=True)
                 except OSError:

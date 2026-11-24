@@ -12,7 +12,7 @@ Provision a trusted local multilingual checkpoint and a compatible worker image 
 docker build --build-arg ROCM_BASE="$ROCM_BASE" -t innervoice-worker:candidate whisper
 ```
 
-Set `ROCM_BASE` to the approved base image reference by digest. Put any host-specific runtime override in the protected Compose environment. Keep the existing protected repository-root `.env` for the Telegram bot token, or set it up from `.env.example` for a new bot.
+Set `ROCM_BASE` to the approved base image reference by digest. Put any host-specific runtime override in the protected Compose environment. Keep a protected repository-root `.env` only when enabling the standalone Telegram bot. See [server audio and Telegram](#server-audio-and-telegram).
 
 Run the guided setup from the repository root:
 
@@ -295,3 +295,25 @@ Keep the Gateway allowlist and the host firewall aligned. The private overlay is
 - Trigger restart during a long inference. Verify one ordered result, absence of duplicate segments, prompt progress from a second owner and a short legacy request. Check replays, different bytes under the same key, unknown owner, credential rotation and revocation, expired results, oversized decoded content, silence and names/numbers. Verify bot fast/full, timestamps, defaults/reset and an explicit false override with two distinct users.
 - Compare three or more repeats per fixed fixture per condition via `python3 clients/smoke.py "$CLIENT_CONFIG" "$FIXTURE" "$EXPECTED_TEXT" --repeats 3`. Use a separate one-hour deadline for long fixtures. Measure cold/warm, short-note absolute latency, real-time factor, boundary speech, language mixing and noise, memory, disk, busy conditions and cleanup. Require warm end-to-end RTF at most 1 per representative voiced clip; compare English-source word error rate and rubric-scored translation fidelity against the incumbent. Require zero new critical name, number or meaning errors. Check direct one-hour results separately from actual Telegram download limits.
 - Validate installed provider outage, no external fallback, deadline and silence behavior. Exercise desktop focus changes, record/stop, offline recovery, retained edits, restart during transfer, short final fragment and clipboard fallback. Record observed results by candidate SHA using synthetic IDs only. Keep the real host, fixture content, runtime measurements and deployment manifest private.
+
+## Server audio and Telegram
+
+The desktop keeps its local recording history. The private server processes uploads, PCM fragments, Whisper temporary files and standalone bot notes in bounded RAM filesystems. Disable swap on the Docker host and run the CLI as a non-root Linux user with a non-root primary group. The deployment disables core files in each service. The Gateway retains transcripts and job metadata in its protected SQLite state according to the existing retention settings. After an unplanned container stop, unprocessed audio may need to be submitted again. Stop recording and drain before an upgrade.
+
+The standalone bot is disabled by default. An agent that already has a Telegram connector does not need it. To enable the standalone bot, set the following two variables in the repository-root, mode-0600 `.env` on the server. Use the actual numeric Telegram user ID and the bot's token. Do not commit this file.
+
+```dotenv
+BOT_TOKEN=<bot token>
+TELEGRAM_USER_ID=<single authorized positive numeric user ID>
+```
+
+```sh
+./bin/innervoice config set deployment.telegram=true deployment.enable=true
+./bin/innervoice restart
+```
+
+The CLI provisions a separate random bot-to-Gateway bearer. Only the bot and Gateway receive it. They communicate through a local Unix socket. The worker is on an internal network. Only the private HTTPS port is published. The Gateway ingress bridge disables IP masquerading. Enforce destination-specific egress at the host or network boundary for explicitly routed networks and for the desktop and Telegram bridge. Permit the workstation to reach the configured Gateway address and TLS port, and permit the standalone bot to reach the Telegram Bot API over HTTPS and the configured DNS resolver. Apply equivalent IPv6 rules if enabled. No bot port is published. To disable the standalone bot, set `deployment.telegram=false` and restart.
+
+For ROCm the default render node is `/dev/dri/renderD128`. If needed, set `IV_RENDER_NODE` and the numeric `WHISPER_RENDER_GROUP` for the selected node. The service identity must be able to read the weights and access both that node and `/dev/kfd`.
+
+On upgrade, stop and drain the earlier version. Inspect its state directory and previous Compose audio volume (normally named with the project prefix and `audio_temp`). Existing audio there, in backups or in old containers is outside the new RAM spool. Review it before deletion. Leave the jobs database and desktop history in place.

@@ -94,14 +94,14 @@ def routes(api):
                 return jobs.failure("duration_limit",413)
             if not jobs.space_available(len(pcm)):
                 return jobs.failure("storage_capacity",503)
-            path=jobs.ROOT/f"{ident}.{index}.pcm"
+            path=jobs.AUDIO/f"{ident}.{index}.pcm"
             temp=path.with_suffix(".part")
             with temp.open("wb") as stream:
                 stream.write(pcm)
                 stream.flush()
                 os.fsync(stream.fileno())
             temp.replace(path)
-            jobs.sync_dir()
+            jobs.sync_dir(jobs.AUDIO)
             db.execute("INSERT INTO fragments VALUES(?,?,?,?)",(ident,index,digest,len(pcm)))
             total=row["total"]
             while db.execute("SELECT 1 FROM fragments WHERE job=? AND idx=?",(ident,total)).fetchone():
@@ -139,7 +139,7 @@ def routes(api):
                     return jobs.failure("finalize_conflict",409)
                 for idx in have:
                     if idx>last:
-                        (jobs.ROOT/f"{ident}.{idx}.pcm").unlink(missing_ok=True)
+                        (jobs.AUDIO/f"{ident}.{idx}.pcm").unlink(missing_ok=True)
                 db.execute("DELETE FROM fragments WHERE job=? AND idx>?",(ident,last))
             db.execute("UPDATE sessions SET closed=1,last=? WHERE id=?",(last,ident))
             if row["done"]==last+1 and not row["finished"]:

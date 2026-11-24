@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import subprocess
+import uuid
+import math
 import time
 import tiktoken
 import aiohttp
@@ -11,7 +13,6 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
-from dotenv import load_dotenv
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from contextlib import suppress
@@ -21,9 +22,18 @@ from collections import defaultdict
 logging.basicConfig(level=logging.INFO)
 
 # Load environment variables
-load_dotenv()
+os.umask(0o077)
 TOKEN = os.getenv("BOT_TOKEN")
-WHISPER_API_URL = os.getenv("WHISPER_API_URL", "http://whisper:9000")
+WHISPER_API_URL = os.environ["WHISPER_API_URL"]
+AUTHORIZED_USER = int(os.environ["TELEGRAM_USER_ID"])
+if AUTHORIZED_USER <= 0:
+    raise ValueError("Configure one positive Telegram user ID")
+GATEWAY_BEARER = Path("/run/telegram/bearer").read_text().strip()
+if len(GATEWAY_BEARER) < 32:
+    raise ValueError("Missing bot gateway credential")
+MAX_BYTES = 16 * 1024**2
+MAX_SECONDS = 600
+MAX_NOTES = 4
 
 # Adjust these constants
 TELEGRAM_TIMEOUT = 200
@@ -40,13 +50,16 @@ bot = Bot(
     connect_timeout=TELEGRAM_TIMEOUT,
 )
 dp = Dispatcher()
+dp.message.filter(F.from_user.id == AUTHORIZED_USER, F.chat.type == "private")
+dp.callback_query.filter(F.from_user.id == AUTHORIZED_USER)
+
 
 # Directories and logging configuration
 AUDIO_DIR = "audios"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
 # Queue to process audios in order
-audio_queue = asyncio.Queue()
+audio_queue = asyncio.Queue(maxsize=MAX_NOTES)
 
 # Duplicate guard: (user_id, file_id) -> timestamp of last processing
 last_processed: Dict[Tuple[int, str], float] = {}
@@ -279,13 +292,20 @@ class WhisperBusyError(Exception):
     pass
 
 
+def gateway_session():
+    return aiohttp.ClientSession(
+        connector=aiohttp.UnixConnector(path="/run/telegram-socket/gateway.sock"),
+        headers={"Authorization": "Bearer " + GATEWAY_BEARER},
+    )
+
+
 async def fetch_whisper_health() -> Optional[dict]:
     """Fetch Whisper /health for GPU stats."""
     try:
-        async with aiohttp.ClientSession() as session:
+        async with gateway_session() as session:
             async with session.get(
                 f"{WHISPER_API_URL.rstrip('/')}/health",
-                timeout=aiohttp.ClientTimeout(total=5),
+                allow_redirects=False, timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status == 200:
                     return await resp.json()
@@ -598,14 +618,28 @@ async def handle_voice(message: types.Message):
         await message.answer(get_text(user_id, "duplicate_skipped"), parse_mode="HTML")
         return
 
-    voice = await bot.download(message.voice)
-    file_path = os.path.join(AUDIO_DIR, f"{file_id}.ogg")
-    with open(file_path, "wb") as f:
-        f.write(voice.read())
+    if not (0 < (message.voice.file_size or 0) <= MAX_BYTES and 0 < message.voice.duration <= MAX_SECONDS):
+        await message.answer("Voice note exceeds the configured limits.")
+        return
+    if len(list(Path(AUDIO_DIR).glob("*.ogg"))) >= MAX_NOTES:
+        await message.answer("The voice queue is full. Try again later.")
+        return
+    path = Path(AUDIO_DIR) / (uuid.uuid4().hex + ".ogg")
+    try:
+        # Count actual downloaded bytes as well as Telegram metadata.
+        class LimitedWriter:
+            def write(self, block):
+                if stream.tell() + len(block) > MAX_BYTES:
+                    raise ValueError("Voice note exceeds byte limit")
+                return stream.write(block)
 
-    # Telegram API expects business_connection_id as string when editing messages in business context
-    business_connection_id = getattr(message, "business_connection_id", None)
-    await audio_queue.put((user_id, file_id, file_path, business_connection_id, prefs))
+        with path.open("xb") as stream:
+            await bot.download(message.voice, destination=LimitedWriter(), seek=False, timeout=60)
+        business = getattr(message, "business_connection_id", None)
+        audio_queue.put_nowait((user_id, file_id, str(path), business, prefs))
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 # --- Helpers ---
@@ -768,18 +802,19 @@ async def _call_whisper_api(
 ) -> dict:
     """Call Whisper API for transcription. Raises WhisperBusyError on 503. Retries on 5xx/connection errors."""
     url = f"{WHISPER_API_URL.rstrip('/')}/transcribe"
-    data = aiohttp.FormData()
-    data.add_field("task", task)
-    data.add_field("return_segments", str(return_segments).lower())
-    if language:
-        data.add_field("language", language)
-    data.add_field("audio", segment_path.read_bytes(), filename=segment_path.name, content_type="audio/wav")
+
 
     last_error = None
     for attempt in range(WHISPER_RETRIES + 1):
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=WHISPER_TIMEOUT)) as resp:
+            data = aiohttp.FormData()
+            data.add_field("task", task)
+            data.add_field("return_segments", str(return_segments).lower())
+            if language:
+                data.add_field("language", language)
+            data.add_field("audio", segment_path.read_bytes(), filename=segment_path.name, content_type="audio/wav")
+            async with gateway_session() as session:
+                async with session.post(url, data=data, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=WHISPER_TIMEOUT)) as resp:
                     if resp.status == 503:
                         try:
                             body = await resp.json()
@@ -844,19 +879,22 @@ async def process_audio_async(
 
     try:
         duration_result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
-            capture_output=True,
+            ["ffprobe", "-protocol_whitelist", "file,pipe", "-f", "ogg", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+            capture_output=True, timeout=15,
             text=True,
         )
         duration = float(duration_result.stdout.strip()) if duration_result.returncode == 0 else 0
+
+        if not math.isfinite(duration) or not 0 < duration <= MAX_SECONDS:
+            raise ValueError("Invalid voice duration")
 
         if not Path(file_path).exists():
             await send_message_safe(user_id, "❌ Audio file not found.")
             return
 
         subprocess.run(
-            ["ffmpeg", "-i", file_path, "-ac", "1", "-ar", "16000", "-sample_fmt", "s16", str(wav_path), "-y"],
-            check=True,
+            ["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", "ogg", "-i", file_path, "-t", str(MAX_SECONDS), "-ac", "1", "-ar", "16000", "-sample_fmt", "s16", str(wav_path), "-y"],
+            timeout=60, check=True,
             capture_output=True,
         )
 
@@ -1034,6 +1072,8 @@ async def process_audio_async(
             parse_mode="HTML",
         )
     finally:
+        for part in wav_path.parent.glob(wav_path.stem + "_part*.wav"):
+            part.unlink(missing_ok=True)
         if not queued_for_later:
             Path(file_path).unlink(missing_ok=True)
             if wav_path.exists():
@@ -1048,8 +1088,8 @@ async def split_audio(wav_path: Path) -> List[Path]:
     segments = []
     output_template = str(wav_path.with_name(f"{wav_path.stem}_part%d{wav_path.suffix}"))
     subprocess.run(
-        ["ffmpeg", "-i", str(wav_path), "-f", "segment", "-segment_time", str(CHUNK_SIZE_SECONDS), "-c", "copy", output_template],
-        check=True,
+        ["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", "wav", "-i", str(wav_path), "-f", "segment", "-segment_time", str(CHUNK_SIZE_SECONDS), "-c", "copy", output_template],
+        timeout=60, check=True,
         capture_output=True,
     )
     index = 0
@@ -1066,8 +1106,8 @@ async def can_whisper_transcribe() -> bool:
     """Return True if Whisper reports enough VRAM to accept a transcribe request."""
     try:
         url = f"{WHISPER_API_URL.rstrip('/')}/can-transcribe"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with gateway_session() as session:
+            async with session.get(url, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 return resp.status == 200
     except Exception as e:
         logging.debug("can-transcribe check failed: %s", e)
@@ -1108,6 +1148,12 @@ async def audio_worker():
 
 
 async def main():
+    if os.getuid() == 0 or os.getgid() == 0:
+        raise RuntimeError("The bot requires a non-root identity")
+    with open("/proc/swaps") as swaps, open("/proc/self/mountinfo") as mounts:
+        volatile = {line.split()[4] for line in mounts if line.split(" - ")[1].startswith("tmpfs ")}
+        if len(swaps.readlines()) > 1 or not {"/tmp", str(Path(AUDIO_DIR).resolve())} <= volatile:
+            raise RuntimeError("The bot requires swap disabled and RAM-backed audio directories")
     load_pending_queue()
     while True:
         audio_worker_task = asyncio.create_task(audio_worker())
