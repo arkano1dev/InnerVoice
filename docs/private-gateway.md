@@ -317,3 +317,18 @@ The CLI provisions a separate random bot-to-Gateway bearer. Only the bot and Gat
 For ROCm the default render node is `/dev/dri/renderD128`. If needed, set `IV_RENDER_NODE` and the numeric `WHISPER_RENDER_GROUP` for the selected node. The service identity must be able to read the weights and access both that node and `/dev/kfd`.
 
 On upgrade, stop and drain the earlier version. Inspect its state directory and previous Compose audio volume (normally named with the project prefix and `audio_temp`). Existing audio there, in backups or in old containers is outside the new RAM spool. Review it before deletion. Leave the jobs database and desktop history in place.
+
+### Enforce bridge egress on Linux
+
+On each Docker host, an administrator can install the supplied nftables policy before starting InnerVoice. It drops new connections from the Gateway ingress bridge, confines desktop connections to the configured private IPv4 endpoint, and allows optional bot HTTPS only to resolved Telegram API addresses. It also covers connections from those bridges to the host. Docker's internal inference network handles the Gateway-to-worker request. Host-network desktop mode bypasses bridge filtering, so use the default bridge mode for this policy.
+
+```bash
+# Server, without the standalone bot
+python3 deploy/egress-policy | sudo nft -f -
+# Server, with the standalone bot
+python3 deploy/egress-policy --telegram | sudo nft -f -
+# Workstation; substitute the actual endpoint used by its client
+python3 deploy/egress-policy --gateway "$GATEWAY_IP" --port "$GATEWAY_PORT" | sudo nft -f -
+```
+
+On a combined host pass both sets of options in a single invocation. Load the policy through the host's firewall configuration on boot. Refresh it when the Gateway endpoint or Telegram DNS records change. The bot uses Docker's embedded DNS resolver. A resolver requiring a separate bridge egress allowance must be restricted to the host's trusted resolver. Prefer a literal private IP for the workstation endpoint. Inspect the active policy with `sudo nft list table inet innervoice_egress`. The bridge names are fixed and intended for one deployment per host.

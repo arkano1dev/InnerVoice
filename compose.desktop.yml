@@ -41,3 +41,7 @@ services:
         target: /home/innervoice/.local/state/innervoice-desktop
         bind:
           create_host_path: false
+networks:
+  default:
+    driver_opts:
+      com.docker.network.bridge.name: iv-desktop0

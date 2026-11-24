@@ -1,5 +1,7 @@
 networks:
-  TelegramNet: {}
+  BotEgress:
+    driver_opts:
+      com.docker.network.bridge.name: iv-telegram0
 services:
   gateway:
     environment:
@@ -11,7 +13,7 @@ services:
     build: ./bot
     restart: unless-stopped
     depends_on: [gateway]
-    networks: [TelegramNet]
+    networks: [BotEgress]
     user: "${IV_UID:?}:${IV_GID:?}"
     read_only: true
     cap_drop: [ALL]

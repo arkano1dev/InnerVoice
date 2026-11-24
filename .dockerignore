@@ -1,3 +1,5 @@
 *
-!requirements.txt
-!bot.py
+!bot/
+bot/*
+!bot/requirements-bot.txt
+!bot/bot.py

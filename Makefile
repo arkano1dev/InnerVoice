@@ -1,26 +1,13 @@
-# Run from project root (directory containing docker-compose.yml)
-.PHONY: up down up-bot up-whisper build logs
+.PHONY: up down up-bot up-whisper build logs logs-bot logs-whisper
 
-up:
-	docker compose up -d --build
-
-down:
-	docker compose down
-
-up-bot:
-	docker compose up -d --build bot
-
-up-whisper:
-	docker compose up -d --build whisper
+up down up-bot up-whisper logs:
+	bash deploy.sh $@
 
 build:
-	docker compose build
-
-logs:
-	docker compose logs -f
+	./bin/innervoice build
 
 logs-bot:
-	docker compose logs -f bot
+	./bin/innervoice logs bot
 
 logs-whisper:
-	docker compose logs -f whisper
+	./bin/innervoice logs whisper

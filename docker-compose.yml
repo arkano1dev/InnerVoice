@@ -2,6 +2,7 @@ networks:
   IngressNet:
     driver: bridge
     driver_opts:
+      com.docker.network.bridge.name: iv-gateway0
       com.docker.network.bridge.enable_ip_masquerade: "false"
 
   InferenceNet:

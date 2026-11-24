@@ -503,6 +503,17 @@ def operate(args):
         return
     validate(cfg)
     active=read(ACTIVE) if ACTIVE.exists() else cfg
+    if args.cmd in ("logs", "build", "worker-only"):
+        if args.action and args.action not in ("gateway", "whisper", "bot"):
+            raise ValueError("Choose gateway, whisper or bot")
+        if args.cmd == "logs":
+            compose(active,"logs","-f", *([args.action] if args.action else []))
+        elif args.cmd == "build":
+            compose(cfg,"build","gateway", *(["bot"] if cfg["deployment"]["telegram"] else []))
+        else:
+            preflight(cfg)
+            compose(cfg,"up","-d","--no-build","--pull","never","whisper")
+        return
     if args.cmd=="dashboard":
         while True:
             try:
@@ -620,7 +631,7 @@ Daily operation
   stop                   Drain jobs and stop services.
   desktop                Manage a native desktop client (setup/start/stop/status/check).
   agent setup            Save a local connection for the command STT provider.""")
-    parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential"])
+    parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential","logs","build","worker-only"])
     parser.add_argument("action",nargs="?")
     parser.add_argument("values",nargs="*")
     parser.add_argument("--setup",action="store_true",help="walk through private Gateway setup before starting")
@@ -638,7 +649,7 @@ Daily operation
     os.umask(0o077)
     HOME.mkdir(mode=0o700,parents=True,exist_ok=True)
     with (HOME/"operator.lock").open("a") as lock:
-        if args.cmd not in ("dashboard","status"):
+        if args.cmd not in ("dashboard","status","logs"):
             fcntl.flock(lock,fcntl.LOCK_EX)
         operate(args)
 

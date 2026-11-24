@@ -123,3 +123,11 @@ asyncio.run(check())
 PY
 "${stack[@]}" restart gateway
 [[ -z "$("${stack[@]}" exec -T gateway sh -c 'find /tmp -name "*.pcm" -print -quit')" ]]
+
+if [[ -n "${IV_TEST_SCANNER:-}" ]]; then
+  result=0
+  for image in "$COMPOSE_PROJECT_NAME-gateway" "$COMPOSE_PROJECT_NAME-bot"; do
+    "$IV_TEST_SCANNER" "docker:$image" --only-fixed --fail-on high || result=1
+  done
+  exit "$result"
+fi
