@@ -4,9 +4,6 @@ networks:
 
 services:
   gateway:
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    user: "${IV_UID:?}:${IV_GID:?}"
     ports:
       - "${IV_PUBLISH:?}:${IV_PORT:?}:9443"
     environment:
