@@ -228,7 +228,10 @@ async def start_handler(message: types.Message):
             "/help - Ayuda\n"
             "/about - Detalles técnicos\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-             "InnerVoice",
+            "Contacto: @arkano21\n\n"
+            "<i>Apoya el desarrollo:</i>\n"
+            "₿ bc1qwktevffc57rkk8lwyd6yqwxrvcd4vjxggcpsrn\n"
+            "⚡ buffswan6@primal.net",
             parse_mode="HTML"
         )
     else:
@@ -248,7 +251,10 @@ async def start_handler(message: types.Message):
             "/help - Learn more\n"
             "/about - Technical details\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-             "InnerVoice",
+            "Contact: @arkano21\n\n"
+            "<i>Support development:</i>\n"
+            "₿ bc1qwktevffc57rkk8lwyd6yqwxrvcd4vjxggcpsrn\n"
+            "⚡ buffswan6@primal.net",
             parse_mode="HTML"
         )
 
@@ -369,7 +375,7 @@ async def about_handler(message: types.Message):
             "<b>📝 Licencia y Código:</b>\n\n"
             "Código abierto - Solución auto-hospedada\n"
             "Tus datos, tu control\n\n"
-             "InnerVoice",
+            "Hecho con ❤️ por @arkano21",
             parse_mode="HTML"
         )
     else:
@@ -408,7 +414,7 @@ async def about_handler(message: types.Message):
             "<b>📝 License & Source:</b>\n\n"
             "Open source - Self-hosted solution\n"
             "Your data, your control\n\n"
-             "InnerVoice",
+            "Made with ❤️ by @arkano21",
             parse_mode="HTML"
         )
 
