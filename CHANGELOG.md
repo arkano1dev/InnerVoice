@@ -568,6 +568,7 @@ Ideas for next iteration:
 
 ### 🙏 Credits
 
+**Original Bot**: @arkano21
 **Enhanced Version**: Major UX overhaul for perfect copy-paste experience
 
 **Key Design Decisions**:
