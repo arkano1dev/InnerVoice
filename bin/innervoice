@@ -29,7 +29,9 @@ FILE = HOME/"deployment.toml"
 ACTIVE = HOME/"active.toml"
 ENGINES = ("openai-whisper","faster-whisper")
 MODELS = ("tiny", "base", "small", "medium", "large", "large-v1", "large-v2", "large-v3")
-PRIVATE_NETWORKS = tuple(ipaddress.IPv4Network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+PRIVATE_NETWORKS = tuple(ipaddress.IPv4Network(cidr) for cidr in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
+))
 DEFAULT = {"deployment":{"version":1,"engine":ENGINES[0],"bind":"","allowed_networks":"","port":9000,"enable":False,
                          "data":str(HOME/"state"),"secrets":str(HOME/"secrets")},
            "limits":{"max_seconds":3600,"upload_mib":128,"quota_mib":1024,"free_floor_mib":64,"jobs":8,"jobs_per_owner":4,"uploads":2,"attempts":3},
@@ -124,7 +126,7 @@ def edit_config(cfg):
 def private_address(value):
     address = ipaddress.IPv4Address(value)
     if not any(address in network for network in PRIVATE_NETWORKS):
-        raise ValueError("Enter a private LAN or VLAN IPv4 address.")
+        raise ValueError("Enter a private IPv4 address on the server's LAN, VLAN or virtual network.")
     return str(address)
 
 
@@ -198,7 +200,7 @@ def setup(cfg, engine=None):
     print("Press Enter to keep a value in brackets. Ctrl+C cancels before saving.\n")
     print("1/4  Private network")
     print("  Use the server's IP on the network your voice client can reach.")
-    deployment["bind"] = prompt("Server's private IPv4 address", deployment["bind"], private_address)
+    deployment["bind"] = prompt("Server IPv4 address (LAN, VLAN or virtual network)", deployment["bind"], private_address)
     deployment["port"] = prompt("HTTPS port", str(deployment["port"]), listen_port)
     print("  Enter the client IP, or multiple IPs or subnets separated by commas.")
     deployment["allowed_networks"] = prompt("Allowed clients", deployment["allowed_networks"], client_networks)

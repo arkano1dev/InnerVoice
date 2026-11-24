@@ -20,11 +20,13 @@ Run the guided setup from the repository root:
 ./bin/innervoice start --setup
 ```
 
-Enter the server's private LAN or VLAN IPv4 address, HTTPS port, allowed client IPs or CIDRs, local worker image, multilingual model name and path to its weights. Setup reads the image ID from Docker and computes the checkpoint SHA-256. Compare the displayed digest with your trusted source before accepting a new or changed checkpoint. Use `config setup` to save the settings without starting services, and `config edit` or `config set` for advanced settings. An existing running Gateway takes saved changes on `restart`.
+Enter the server's IPv4 address on its private LAN, VLAN or virtual network, HTTPS port, allowed client IPs or CIDRs, local worker image, multilingual model name and path to its weights. Setup reads the image ID from Docker and computes the checkpoint SHA-256. Compare the displayed digest with your trusted source before accepting a new or changed checkpoint. Use `config setup` to save the settings without starting services, and `config edit` or `config set` for advanced settings. An existing running Gateway takes saved changes on `restart`.
 
 Setup reuses the saved certificate and key if they match the chosen IP. If neither exists, it uses OpenSSL to create a self-signed certificate valid for 90 days. You can also install your own `tls.crt` and `tls.key` in the protected secrets directory before setup. For an existing CA-issued certificate, put its trust chain in `ca.crt` in the same directory if setup is creating a smoke-test client.
 
 On first setup, the wizard creates a local smoke-test client if the server has no credential map. Its bearer file, trust certificate and `client.toml` are under `~/.config/innervoice/clients/operator-smoke` by default. From another authorized machine, copy the public trust certificate and bearer file over a protected channel and adapt the paths in the client TOML. For the Telegram agent, provision a separate credential with `./bin/innervoice credential --identity telegram-agent`.
+
+The setup accepts RFC 1918 private ranges and the RFC 6598 shared range (`100.64.0.0/10`) for both the server IP and the client list. On a shared-address virtual network, use the IP assigned to the server and list each authorized client's IP as a `/32`.
 
 The HTTPS listener rejects peers outside the configured private IPv4 addresses or CIDRs before processing bearer credentials. Apply the same restriction at the host/VLAN boundary and verify that Docker forwards the authorized source address. The worker has no published host port. Legacy routes are available inside Compose on `gateway:9000`. The private HTTPS port serves only the versioned API.
 
