@@ -10,7 +10,7 @@
 | Get a transcript or translation in Telegram | The standalone InnerVoice bot sends the result back in your Telegram chat. See the [bot guide](DOCUMENTATION.md) and [current bot source](bot/bot.py). |
 | Dictate into a desktop app | The optional Ubuntu client lets you start and stop with a shortcut, edit text as it arrives, and copy the result. The Docker client uses Wayland. Run the client [in Docker](docs/private-gateway.md#run-the-desktop-client-in-docker) or [directly on Ubuntu](docs/private-gateway.md#run-directly-on-ubuntu). |
 
-The **Voice Gateway** accepts audio over private HTTPS, uses a shared Whisper worker and keeps track of work so accepted jobs can resume after an interruption. The standalone bot connects through a separate internal endpoint. The desktop client saves fragments locally so a recording can be recovered after an interruption.
+The **Voice Gateway** accepts audio over private HTTPS, uses a shared Whisper worker and keeps track of work so accepted jobs can resume after an interruption. The standalone bot connects through a separate internal endpoint. The desktop client saves audio on the workstation while you record. Pause, listen, and resume the same take, or reopen one of the ten most recent recordings from the clock.
 
 ## Get started
 
@@ -26,6 +26,7 @@ The private Gateway and full-file agent integration are **Release A**. The deskt
 | --- | --- |
 | Server | Run `./bin/innervoice config worker` to choose Whisper settings, then `./bin/innervoice restart` to apply them with the saved connection. |
 | Ubuntu workstation | Run `./bin/innervoice-desktop power` to turn dictation on or off. Press the configured shortcut to record, press again to finish, then paste the copied text wherever you need it. |
+| Desktop storage | Run `./bin/innervoice-desktop storage` to see the folder, usage and 2 GiB default audio limit. See the [desktop guide](docs/private-gateway.md#desktop-role) to change the limit or preview cleanup. |
 | Agent host | Run `./bin/innervoice agent setup` once with its own jobs credential. Point the STT provider at the saved client settings. |
 
 See [daily commands and mesh access](docs/private-gateway.md#daily-operation-and-network-boundaries) for the panel indicator, credential scopes, port exposure and clipboard privacy.

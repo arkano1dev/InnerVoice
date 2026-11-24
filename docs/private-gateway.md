@@ -41,7 +41,7 @@ First activation replaces the old port mapping. Schedule it after recording the 
 | Leave the server available | Start once. Compose uses `unless-stopped` for the gateway, bot and worker. Enable Docker at boot on the server. |
 | Switch the workstation on or off | `./bin/innervoice-desktop power`. For a shell shortcut, define `alias ivpower='"/absolute/path/to/InnerVoice/bin/innervoice-desktop" power'`. Native installations use `./bin/innervoice desktop power`. |
 | Check the connection on demand | `./bin/innervoice-desktop check` verifies TLS, token and API from the running container. `status` shows process state. |
-| Reopen the last text | `./bin/innervoice-desktop show` or **Show editor** in the indicator menu. |
+| Show the current editor | `./bin/innervoice-desktop show` or **Show editor** in the indicator menu. |
 
 **Mesh access.** Connect the agent and gateway as direct peers. Give the agent outbound access to the gateway peer and its HTTPS TCP port only. Deny peer traffic routing, LAN access through the peer and file sharing. Apply a default-deny rule to other services on the gateway host too. If the gateway lives behind a separate mesh router, put a peer on the gateway itself or use a destination-and-port-specific firewall rule on a dedicated ingress. A gateway token governs API calls only.
 
@@ -101,7 +101,7 @@ against the previous working image with the same operator settings.
 | --- | --- |
 | Agent with a Telegram connector | Give the agent its own Gateway identity and configure [the speech provider](#agent-connection) in the installed framework. The agent handles the Telegram event and receives one final UTF-8 prompt. Verify its silence, retry, timeout and external fallback settings. |
 | InnerVoice Telegram bot | Configure the bot token during server provisioning. Send `/start` and a voice note, then verify the bot's fast and full modes, preferences and timestamps. |
-| Ubuntu desktop | Follow [desktop setup](#desktop-role) to provision a separate identity and start the recorder from your graphical session. Press the hotkey to start and again to stop. If the original target cannot be verified, the edited text stays available in the editor. |
+| Ubuntu desktop | Follow [desktop setup](#desktop-role) to provision a separate identity and start the recorder from your graphical session. Press the hotkey to start and again to stop. Edit the transcript and copy it into the destination application. |
 
 ## CLI reference
 
@@ -253,7 +253,7 @@ Press the shortcut once to record and again to stop. Existing shortcuts keep the
 The preview lists eligible folders. Applying removes only numbered audio fragments from completed takes outside the newest ten audio recordings. Transcripts and pending takes are retained. The menu limit itself never deletes audio.
 
 
-For acceptance, with another Wayland app focused, record a five-second note with the shortcut and stop it with the same shortcut. Verify that text appears in the editor and can be copied into the other app. Repeat on your normal microphone and private network. Run the lightweight regression tests with `python3 -m unittest discover -s tests -v` from the checkout when `requests` is installed.
+For acceptance, with another Wayland app focused, record a five-second note with the shortcut and stop it with the same shortcut. Verify that text appears in the editor and can be copied into the other app. Repeat on your normal microphone and private network. Run the lightweight regression tests with `python3 -m unittest discover -s tests -v` from the checkout with `requests` and PyQt5 installed so the editor test runs.
 
 #### Mesh VPN works on the workstation but times out in the container
 
@@ -282,7 +282,7 @@ pip install requests tomli sounddevice pynput
 ./bin/innervoice desktop stop
 ```
 
-Provision a separate desktop identity with the server CLI before setup. Set the private URL, trust root and token path. Leave source IP empty and port zero for OS selection. On Wayland, point a desktop custom shortcut to the virtual environment's Python interpreter followed by the absolute path to `clients/desktop.py` and the argument `toggle`. On X11, use the hotkey selected at setup. Press once to start and again to stop. The editor appends indexed text while preserving edits. On reconnect the client compares durable fragment indexes. On restart it recovers the saved capture. After recording stops, **Retry sync** resumes a failed transfer from saved audio. If the Gateway session expired or failed permanently, that action starts a replacement session while keeping edited text. Local fragments are removed after the editor has saved the result. On completion the full editor contents go to the clipboard. Paste in the destination with its usual shortcut. Desktop stop affects only the user service. After stopping, archive or remove the user's config, state and virtual environment when decommissioning.
+Provision a separate desktop identity with the server CLI before setup. Set the private URL, trust root and token path. Leave source IP empty and port zero for OS selection. On Wayland, point a desktop custom shortcut to the virtual environment's Python interpreter followed by the absolute path to `clients/desktop.py` and the argument `toggle`. On X11, use the hotkey selected at setup. Press once to start and again to stop. The editor appends indexed text while preserving edits. On reconnect the client compares durable fragment indexes. After restart the editor opens empty. Open the clock to select a recent saved capture. After recording stops, **Retry sync** resumes a failed transfer from saved audio. If the Gateway session expired or failed permanently, that action starts a replacement session while keeping edited text. Local audio remains in the workstation history after transcription. The same storage limit and cleanup commands apply to native and container installations. On completion the full editor contents go to the clipboard. Paste in the destination with its usual shortcut. Desktop stop affects only the user service. After stopping, archive or remove the user's config, state and virtual environment when decommissioning.
 
 GET /v1/capabilities advertises sessions. POST /v1/sessions with Idempotency-Key, PUT a mono 16 kHz signed 16-bit WAV to /v1/sessions/{id}/fragments/{index}, GET the session and POST /v1/sessions/{id}/finalize with last_index. Missing indexes are returned in a 409 response. A deliberate recover_prefix request may discard stored fragments beyond the contiguous prefix. Finalization returns a pollable job.
 

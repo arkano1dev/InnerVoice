@@ -21,6 +21,17 @@ import desktop
 
 
 class WaylandDesktopTests(unittest.TestCase):
+    def test_desktop_build_context_includes_copy_sources(self):
+        clients = ROOT / "clients"
+        rules = (clients / "Dockerfile.desktop.dockerignore").read_text().splitlines()
+        self.assertEqual(rules[0], "*")
+        included = {rule[1:] for rule in rules if rule.startswith("!")}
+        for line in (clients / "Dockerfile.desktop").read_text().splitlines():
+            if line.startswith("COPY "):
+                for source in shlex.split(line)[1:-1]:
+                    self.assertIn(source, included)
+                    self.assertTrue((clients / source).is_file())
+
     def test_setup_validates_connection_and_saves_hidden_token(self):
         token = "t" * 40
         caps = {"api_version": 1, "sessions": True, "fragment_seconds": 30}
