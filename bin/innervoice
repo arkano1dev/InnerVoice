@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""Private Gateway operator commands (Python 3.11+)."""
+import argparse
+import contextlib
+import fcntl
+import getpass
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import ssl
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+try:
+    import tomllib
+except ImportError:  # Python 3.10 on Ubuntu 22.04
+    import tomli as tomllib
+
+REPO = Path(__file__).resolve().parents[1]
+HOME = Path(os.environ.get("INNERVOICE_CONFIG_DIR", Path.home()/".config/innervoice")).resolve()
+FILE = HOME/"deployment.toml"
+ACTIVE = HOME/"active.toml"
+ENGINES = ("openai-whisper","faster-whisper")
+DEFAULT = {"deployment":{"version":1,"engine":ENGINES[0],"bind":"","allowed_networks":"","port":9000,"enable":False,
+                         "data":str(HOME/"state"),"secrets":str(HOME/"secrets")},
+           "limits":{"max_seconds":3600,"upload_mib":128,"quota_mib":1024,"free_floor_mib":64,"jobs":8,"jobs_per_owner":4,"uploads":2,"attempts":3},
+           "retention":{"result_seconds":3600,"failed_seconds":86400,"tombstone_seconds":86400,"telemetry_days":30},
+           "validation":{"retained_terms":""},
+           "benchmark":{"repeats":3,"warm_rtf_limit":1.0},
+           "bot.defaults":{"ui_language":"es","language":"es","mode":"full","show_stats":True,"timestamps":False},
+           **{e:{"image":"","weights":"","digest":"","model":"medium","image_id":"","fp16":True,"beam":1,"previous_text":False,"compile":True,"idle_seconds":900} for e in ENGINES}}
+
+
+def atomic(path,data):
+    with tempfile.NamedTemporaryFile(dir=path.parent,delete=False) as out:
+        out.write(data)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(out.name,path)
+    fd=os.open(path.parent,os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def serialize(cfg):
+    return "".join("["+section+"]\n"+"".join(f"{k} = {json.dumps(v)}\n" for k,v in values.items())+"\n"
+                   for section,values in cfg.items()).encode()
+
+
+def read(path):
+    with path.open("rb") as stream:
+        cfg=tomllib.load(stream)
+    cfg["bot.defaults"]=cfg.pop("bot")["defaults"]
+    return cfg
+
+
+def validate(cfg):
+    d=cfg["deployment"]
+    ip=ipaddress.ip_address(d["bind"])
+    if ip.version!=4 or not ip.is_private or ip.is_unspecified or ip.is_loopback or ip.is_multicast:
+        raise ValueError("Choose a private VLAN IPv4 address")
+    if not 1<=d["port"]<=65535 or d["engine"] not in ENGINES or d["version"]!=1:
+        raise ValueError("Invalid deployment settings")
+    for network in d["allowed_networks"].split(","):
+        if network.strip():
+            ipaddress.ip_network(network.strip(),strict=False)
+    for section,values in DEFAULT.items():
+        for key,default in values.items():
+            if type(cfg[section][key]) is not type(default):
+                raise ValueError("Invalid setting type: "+section+"."+key)
+    if any(v<=0 for group in ("retention","limits","benchmark") for v in cfg[group].values()):
+        raise ValueError("Limits, retention and benchmark settings must be positive")
+    if cfg["limits"]["max_seconds"]>3600 or cfg["limits"]["jobs_per_owner"]>cfg["limits"]["jobs"]:
+        raise ValueError("Invalid capacity settings")
+    for k in ("data","secrets"):
+        if not Path(d[k]).is_absolute():
+            raise ValueError("Use absolute data and secret directories")
+    for engine in ENGINES:
+        profile=cfg[engine]
+        if profile["model"] not in ("tiny","base","small","medium","large","large-v1","large-v2","large-v3"):
+            raise ValueError("Select multilingual translation weights")
+    b=cfg["bot.defaults"]
+    if b["ui_language"] not in ("en","es") or b["language"] not in "es en fr nl pt it ja zh".split() or b["mode"] not in ("fast","full"):
+        raise ValueError("Invalid Telegram defaults")
+
+
+def set_value(cfg,field,raw):
+    section,key=field.rsplit(".",1)
+    old=DEFAULT[section][key]
+    if type(old) is bool and raw.lower() not in ("true","false"):
+        raise ValueError("Boolean settings accept true or false")
+    cfg[section][key]=raw.lower()=="true" if type(old) is bool else type(old)(raw)
+
+
+def setup(cfg):
+    for section,fields in cfg.items():
+        for key,value in fields.items():
+            if key in ("version","engine"):
+                continue
+            raw=input(f"{section}.{key} [{value}]: ").strip()
+            if raw:
+                set_value(cfg,section+"."+key,raw)
+    validate(cfg)
+    if input("Save settings [y/N]? ").lower()!="y":
+        raise SystemExit("Cancelled")
+    if FILE.exists():
+        atomic(HOME/"previous.toml",FILE.read_bytes())
+    atomic(FILE,serialize(cfg))
+
+
+def env(cfg):
+    d=cfg["deployment"]
+    p=cfg[d["engine"]]
+    options={f"IV_{k.upper()}":str(v) for group in ("limits","retention","validation") for k,v in cfg[group].items()}
+    return dict(os.environ,**options,IV_FP16=str(p["fp16"]).lower(),IV_BEAM=str(p["beam"]),
+                IV_PREVIOUS=str(p["previous_text"]).lower(),IV_COMPILE=str(p["compile"]).lower(),IV_IDLE=str(p["idle_seconds"]),
+                IV_ENGINE=d["engine"],IV_UID=str(os.getuid()),IV_GID=str(os.getgid()),
+                IV_BIND=d["bind"],IV_PORT=str(d["port"]),IV_ENABLE=str(int(d["enable"])),
+                IV_IMAGE=p["image"],IV_WEIGHTS=p["weights"],IV_MODEL=p["model"],IV_DIGEST=p["digest"],
+                IV_DATA=d["data"],IV_SECRETS=d["secrets"],IV_BOT=json.dumps(cfg["bot.defaults"]),
+                IV_REVISION=hashlib.sha256(json.dumps([p,d["engine"],cfg["validation"],"decoder-v1"],sort_keys=True).encode()).hexdigest())
+
+
+def compose(cfg,*args,capture=False):
+    return subprocess.run(["docker","compose","-f","docker-compose.yml","-f","compose.private.yml",*args],
+                          cwd=REPO,env=env(cfg),check=True,capture_output=capture,text=True)
+
+
+def preflight(cfg):
+    d=cfg["deployment"]
+    p=cfg[d["engine"]]
+    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}",p["image"]) and not re.fullmatch(r"sha256:[0-9a-f]{64}",p["image_id"]):
+        raise ValueError("Set the provisioned candidate worker image by digest")
+    image_id=subprocess.check_output(["docker","image","inspect","--format","{{.Id}}",p["image"]],text=True).strip()
+    if p["image_id"] and p["image_id"]!=image_id:
+        raise ValueError("Provisioned image identity differs from manifest")
+    if not p["fp16"] and d["engine"]=="faster-whisper":
+        raise ValueError("Experimental engine requires float16")
+    if p["beam"]<1 or p["idle_seconds"]<0:
+        raise ValueError("Invalid decoder or idle settings")
+    weights=Path(p["weights"])
+    if not weights.is_absolute():
+        raise ValueError("Use an absolute local weights path")
+    digest=hashlib.sha256()
+    if weights.is_dir():
+        files=sorted(f for f in weights.rglob("*") if f.is_file())
+        if not files:
+            raise ValueError("Empty weights directory")
+    else:
+        files=[weights]
+    for f in files:
+        if weights.is_dir():
+            digest.update(f.relative_to(weights).as_posix().encode()+b"\0")
+        with f.open("rb") as stream:
+            while chunk:=stream.read(1024**2):
+                digest.update(chunk)
+    if digest.hexdigest()!=p["digest"]:
+        raise ValueError("Weight digest mismatch")
+    for name in ("clients.json","tls.key","tls.crt"):
+        if not (Path(d["secrets"])/name).is_file():
+            raise ValueError("Missing server secret file: "+name)
+    secret_dir=Path(d["secrets"])
+    ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(secret_dir/"tls.crt",secret_dir/"tls.key")
+    cert=ssl._ssl._test_decode_cert(str(secret_dir/"tls.crt"))
+    if ("IP Address",d["bind"]) not in cert.get("subjectAltName",()):
+        raise ValueError("Certificate must include the configured VLAN IP SAN")
+    clients=json.loads((secret_dir/"clients.json").read_bytes())
+    if not clients or not all(re.fullmatch(r"[a-z0-9-]{1,48}",k) and re.fullmatch(r"[0-9a-f]{64}",v) for k,v in clients.items()):
+        raise ValueError("Invalid credential map")
+    Path(d["data"]).mkdir(mode=0o700,parents=True,exist_ok=True)
+
+
+def snapshot(cfg,job=None):
+    path=Path(cfg["deployment"]["data"])/"jobs.db"
+    with contextlib.closing(sqlite3.connect(path.as_uri()+"?mode=ro",uri=True,timeout=1)) as db:
+        db.row_factory=sqlite3.Row
+        query="SELECT * FROM performance"
+        params=()
+        if job:
+            query+=" WHERE id=?"
+            params=(job,)
+        rows=[dict(r) for r in db.execute(query+" ORDER BY created DESC LIMIT 25",params)]
+        for row in rows:
+            duration=row["audio_seconds"]
+            row["real_time_factor"]=row["inference_seconds"]/duration if duration else None
+        signal=db.execute("SELECT observed,profile,admitting FROM heartbeat WHERE singleton=1").fetchone()
+        return dict(service=dict(signal) if signal else None,stale=not signal or time.time()-signal["observed"]>35,
+                    jobs=rows,rejections=dict(db.execute("SELECT code,count FROM rejections")))
+
+
+
+def operate(args):
+    cfg=read(FILE) if FILE.exists() else {k:dict(v) for k,v in DEFAULT.items()}
+    if args.cmd=="initialize" or args.setup or (args.cmd=="config" and args.action in ("edit","setup")):
+        setup(cfg)
+        if args.cmd!="start":
+            return
+    if not FILE.exists():
+        raise ValueError("Run innervoice start --setup first")
+    if args.cmd=="config":
+        if args.action=="set":
+            for pair in args.values:
+                field,raw=pair.split("=",1)
+                if field=="deployment.engine":
+                    raise ValueError("Select engine with start or restart --engine")
+                set_value(cfg,field,raw)
+            validate(cfg)
+            atomic(HOME/"previous.toml",FILE.read_bytes())
+            atomic(FILE,serialize(cfg))
+        elif args.action=="show":
+            visible={k:dict(v) for k,v in cfg.items()}
+            for k in ("data","secrets","bind","allowed_networks"):
+                visible["deployment"][k]="<configured>" if cfg["deployment"][k] else "<unset>"
+            for engine in ENGINES:
+                visible[engine]["weights"]="<configured>" if cfg[engine]["weights"] else "<unset>"
+            visible["validation"]["retained_terms"]="<configured>"
+            print(serialize(visible).decode())
+        else:
+            validate(cfg)
+        return
+    validate(cfg)
+    active=read(ACTIVE) if ACTIVE.exists() else cfg
+    if args.cmd=="dashboard":
+        while True:
+            try:
+                print(json.dumps({"at":time.time(),"jobs":snapshot(active,args.job)}),flush=True)
+            except sqlite3.Error:
+                print("Gateway metadata unavailable; snapshot stale",flush=True)
+            if not args.watch:
+                return
+            time.sleep(2)
+    if args.cmd=="status":
+        compose(active,"ps")
+        print("Saved engine:",cfg["deployment"]["engine"],"active engine:",active["deployment"]["engine"] if ACTIVE.exists() else "unavailable",
+              "pending edits:",not ACTIVE.exists() or active!=cfg)
+        return
+    if args.cmd=="credential":
+        root=Path(cfg["deployment"]["secrets"])
+        root.mkdir(mode=0o700,parents=True,exist_ok=True)
+        path=root/"clients.json"
+        clients=json.loads(path.read_bytes()) if path.exists() else {}
+        if not re.fullmatch(r"[a-z0-9-]{1,48}",args.identity or ""):
+            raise ValueError("Use a short lowercase integration label")
+        secret=getpass.getpass("Client bearer token (at least 32 characters): ")
+        if len(secret)<32:
+            raise ValueError("Token too short")
+        digest=hashlib.sha256(secret.encode()).hexdigest()
+        if any(v==digest and k!=args.identity for k,v in clients.items()):
+            raise ValueError("Each integration requires its own token")
+        clients[args.identity]=digest
+        atomic(path,json.dumps(clients).encode())
+        return
+    if args.engine:
+        cfg["deployment"]["engine"]=args.engine
+    if args.cmd!="stop":
+        preflight(cfg)
+        # Complete candidate builds before interrupting an active service.
+        compose(cfg,"build","bot","gateway")
+    if args.cmd in ("stop","restart") and ACTIVE.exists():
+        data=Path(active["deployment"]["data"])
+        drain=data/"drain"
+        (data/"drained").unlink(missing_ok=True)
+        atomic(drain,b"1")
+        try:
+            until=time.monotonic()+120
+            while compose(active,"ps","--status","running","-q","gateway",capture=True).stdout.strip():
+                with contextlib.closing(sqlite3.connect((data/"jobs.db").as_uri()+"?mode=ro",uri=True)) as db:
+                    busy=db.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','processing')").fetchone()[0]
+                if not busy and (data/"drained").exists():
+                    break
+                if time.monotonic()>until:
+                    raise ValueError("Drain timed out")
+                time.sleep(1)
+            compose(active,"stop","bot","gateway","whisper")
+        finally:
+            drain.unlink(missing_ok=True)
+    if args.cmd=="stop":
+        return
+    if args.cmd=="start" and ACTIVE.exists() and serialize(active)!=serialize(cfg):
+        running=compose(active,"ps","--status","running","-q",capture=True).stdout.strip()
+        if running:
+            raise ValueError("Use restart to change active configuration")
+    compose(cfg,"up","-d","--no-build","--pull","never")
+    probe=("import requests; h=requests.get('http://127.0.0.1:9000/health',timeout=7).json(); "
+           "g=requests.get('http://127.0.0.1:9000/gpu-check',timeout=7).json(); "
+           "print(h['engine'],h['model'],h['profile'],g['gpu'].get('available',False))")
+    expected=" ".join((cfg["deployment"]["engine"],cfg[cfg["deployment"]["engine"]]["model"],env(cfg)["IV_REVISION"],"True"))
+    for _ in range(30):
+        try:
+            if compose(cfg,"exec","-T","gateway","python","-c",probe,capture=True).stdout.strip()==expected:
+                atomic(ACTIVE,serialize(cfg))
+                atomic(FILE,serialize(cfg))
+                return
+        except subprocess.CalledProcessError:
+            pass
+        time.sleep(2)
+    compose(cfg,"stop","bot","gateway","whisper")
+    raise ValueError("Activation failed; restore the previous settings and run start")
+
+
+def main():
+    if sys.argv[1:2]==["desktop"]:
+        script=str(REPO/"clients/desktop.py")
+        os.execv(sys.executable,[sys.executable,script,*sys.argv[2:]])
+    parser=argparse.ArgumentParser()
+    parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential"])
+    parser.add_argument("action",nargs="?")
+    parser.add_argument("values",nargs="*")
+    parser.add_argument("--setup",action="store_true")
+    parser.add_argument("--engine",choices=ENGINES)
+    parser.add_argument("--job")
+    parser.add_argument("--watch",action="store_true")
+    parser.add_argument("--identity")
+    args=parser.parse_args()
+    os.umask(0o077)
+    HOME.mkdir(mode=0o700,parents=True,exist_ok=True)
+    with (HOME/"operator.lock").open("a") as lock:
+        if args.cmd not in ("dashboard","status"):
+            fcntl.flock(lock,fcntl.LOCK_EX)
+        operate(args)
+
+
+if __name__=="__main__":
+    try:
+        main()
+    except (ValueError,KeyError,OSError,sqlite3.Error,subprocess.CalledProcessError) as error:
+        sys.exit(str(error))

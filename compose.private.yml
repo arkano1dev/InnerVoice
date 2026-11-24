@@ -1,0 +1,43 @@
+services:
+  gateway:
+    user: "${IV_UID:?}:${IV_GID:?}"
+    ports:
+      - "${IV_BIND:?}:${IV_PORT:?}:9443"
+    environment:
+      PRIVATE_API: "1"
+      ENABLE_JOBS: "${IV_ENABLE:-0}"
+      IV_MAX_SECONDS: "${IV_MAX_SECONDS-}"
+      IV_UPLOAD_MIB: "${IV_UPLOAD_MIB-}"
+      IV_QUOTA_MIB: "${IV_QUOTA_MIB-}"
+      IV_FREE_FLOOR_MIB: "${IV_FREE_FLOOR_MIB-}"
+      IV_JOBS: "${IV_JOBS-}"
+      IV_JOBS_PER_OWNER: "${IV_JOBS_PER_OWNER-}"
+      IV_UPLOADS: "${IV_UPLOADS-}"
+      IV_ATTEMPTS: "${IV_ATTEMPTS-}"
+      IV_RESULT_SECONDS: "${IV_RESULT_SECONDS-}"
+      IV_FAILED_SECONDS: "${IV_FAILED_SECONDS-}"
+      IV_TOMBSTONE_SECONDS: "${IV_TOMBSTONE_SECONDS-}"
+      IV_TELEMETRY_DAYS: "${IV_TELEMETRY_DAYS-}"
+      IV_RETAINED_TERMS: "${IV_RETAINED_TERMS-}"
+      PROFILE_REVISION: "${IV_REVISION:?}"
+    volumes:
+      - "${IV_DATA:?}:/state"
+      - "${IV_SECRETS:?}:/run/innervoice:ro"
+  whisper:
+    environment:
+      PROFILE_REVISION: "${IV_REVISION:?}"
+      WHISPER_FP16: "${IV_FP16:?}"
+      WHISPER_BEAM_SIZE: "${IV_BEAM:?}"
+      WHISPER_CONDITION_ON_PREVIOUS_TEXT: "${IV_PREVIOUS:?}"
+      WHISPER_TORCH_COMPILE: "${IV_COMPILE:?}"
+      WHISPER_IDLE_UNLOAD_SECONDS: "${IV_IDLE:?}"
+      WHISPER_ENGINE: "${IV_ENGINE:?}"
+      WHISPER_MODEL: "${IV_MODEL:?}"
+      WHISPER_LOCAL_WEIGHTS: /weights/model
+      WHISPER_WEIGHT_DIGEST: "${IV_DIGEST:?}"
+    volumes:
+      - "${IV_WEIGHTS:?}:/weights/model:ro"
+    image: "${IV_IMAGE:?}"
+  bot:
+    environment:
+      INNERVOICE_BOT_DEFAULTS: "${IV_BOT:?}"

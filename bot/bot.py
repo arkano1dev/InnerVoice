@@ -77,16 +77,33 @@ PROCESSING_MODES = {
     "full": {"name": "Full Mode", "icon": "📝", "description": "Original + English translation"},
 }
 
-# User preferences - default Spanish for immediate first-audio flow
-user_preferences = defaultdict(
-    lambda: {
-        "language": "es",
-        "mode": "full",
-        "show_stats": True,
-        "timestamps": False,
-        "ui_language": "es",  # Default Spanish - no blocking language selection
-    }
-)
+# Store only explicit overrides, so deployment defaults continue to apply.
+defaults = dict(language="es",mode="full",show_stats=True,timestamps=False,ui_language="es")
+defaults.update(json.loads(os.getenv("INNERVOICE_BOT_DEFAULTS","{}")))
+PREF_PATH = Path(AUDIO_DIR) / "preferences.json"
+overrides = json.loads(PREF_PATH.read_bytes()) if PREF_PATH.exists() else {}
+
+
+def preferences(user_id):
+    return {**defaults, **overrides.get(str(user_id), {})}
+
+
+def set_preference(user_id, key=None, value=None):
+    updated = dict(overrides)
+    uid = str(user_id)
+    if key is None:
+        updated.pop(uid,None)
+    else:
+        updated[uid] = {**updated.get(uid,{}), key:value}
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w",dir=AUDIO_DIR,delete=False) as out:
+        json.dump(updated,out)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(out.name,PREF_PATH)
+    overrides.clear()
+    overrides.update(updated)
+
 
 # UI Text translations
 UI_TEXTS = {
@@ -152,7 +169,7 @@ progress_messages: Dict[str, int] = {}
 
 def get_text(user_id: int, key: str) -> str:
     """Get translated text for user's UI language."""
-    ui_lang = user_preferences[user_id].get("ui_language", "es")
+    ui_lang = preferences(user_id).get("ui_language", "es")
     if ui_lang not in UI_TEXTS:
         ui_lang = "es"
     return UI_TEXTS[ui_lang].get(key, key)
@@ -188,7 +205,8 @@ def load_pending_queue() -> None:
                 file_id = item[1]
                 file_path = item[2]
                 business_connection_id = item[3] if len(item) > 3 else None
-                pending_list.append((user_id, file_id, file_path, business_connection_id))
+                prefs = item[4] if len(item)>4 else preferences(user_id)
+                pending_list.append((user_id, file_id, file_path, business_connection_id, prefs))
     except Exception as e:
         logging.warning("Could not load pending queue: %s", e)
 
@@ -198,7 +216,7 @@ def save_pending_queue() -> None:
     try:
         out = []
         for t in pending_list:
-            out.append([t[0], t[1], t[2], t[3]])  # JSON allows null for None
+            out.append(list(t))  # JSON allows null for None
         with open(PENDING_QUEUE_PATH, "w") as f:
             json.dump(out, f)
     except Exception as e:
@@ -230,7 +248,7 @@ def create_mode_keyboard() -> InlineKeyboardMarkup:
 
 def create_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Create settings keyboard showing current preferences."""
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     lang_info = SUPPORTED_LANGUAGES[prefs["language"]]
     mode_info = PROCESSING_MODES[prefs["mode"]]
     ui_lang = prefs.get("ui_language", "es")
@@ -242,6 +260,7 @@ def create_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"UI: {ui_lang_label}", callback_data="change_ui_lang")],
         [InlineKeyboardButton(text=f"Stats: {'✅' if prefs['show_stats'] else '❌'}", callback_data="toggle_stats")],
         [InlineKeyboardButton(text=f"Timestamps: {'✅' if prefs['timestamps'] else '❌'}", callback_data="toggle_timestamps")],
+        [InlineKeyboardButton(text="Restore defaults / Restaurar valores",callback_data="restore_defaults")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -281,7 +300,7 @@ async def fetch_whisper_health() -> Optional[dict]:
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     user_id = message.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     ui_lang = prefs.get("ui_language", "es")
 
     if ui_lang == "es":
@@ -327,7 +346,7 @@ async def start_handler(message: types.Message):
 @dp.message(Command("help"))
 async def help_handler(message: types.Message):
     user_id = message.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     lang_info = SUPPORTED_LANGUAGES[prefs["language"]]
     mode_info = PROCESSING_MODES[prefs["mode"]]
     ui_lang = prefs.get("ui_language", "es")
@@ -383,7 +402,7 @@ async def help_handler(message: types.Message):
 @dp.message(Command("about"))
 async def about_handler(message: types.Message):
     user_id = message.from_user.id
-    ui_lang = user_preferences[user_id].get("ui_language", "es")
+    ui_lang = preferences(user_id).get("ui_language", "es")
 
     if ui_lang == "es":
         await message.answer(
@@ -406,7 +425,7 @@ async def about_handler(message: types.Message):
 @dp.message(Command("settings"))
 async def settings_handler(message: types.Message):
     user_id = message.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     ui_lang = prefs.get("ui_language", "es")
 
     msg = (
@@ -420,7 +439,7 @@ async def settings_handler(message: types.Message):
 @dp.message(Command("lang"))
 async def lang_handler(message: types.Message):
     user_id = message.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     ui_lang = prefs.get("ui_language", "es")
     current_lang_info = SUPPORTED_LANGUAGES[prefs["language"]]
 
@@ -434,7 +453,7 @@ async def lang_handler(message: types.Message):
 @dp.message(Command("mode"))
 async def mode_handler(message: types.Message):
     user_id = message.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     mode_info = PROCESSING_MODES[prefs["mode"]]
     ui_lang = prefs.get("ui_language", "es")
 
@@ -448,12 +467,20 @@ async def mode_handler(message: types.Message):
 # --- Callback handlers ---
 
 
+@dp.callback_query(lambda c: c.data == "restore_defaults")
+async def restore_defaults(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    set_preference(user_id)
+    await callback_query.message.edit_reply_markup(reply_markup=create_settings_keyboard(user_id))
+    await callback_query.answer()
+
+
 @dp.callback_query(lambda c: c.data and c.data.startswith("ui_lang_"))
 async def process_ui_language_callback(callback_query: types.CallbackQuery):
     lang_code = callback_query.data.split("_")[2]
     user_id = callback_query.from_user.id
     if lang_code in ("es", "en"):
-        user_preferences[user_id]["ui_language"] = lang_code
+        set_preference(user_id,"ui_language",lang_code)
         msg = "✅ Idioma configurado a Español!" if lang_code == "es" else "✅ Language set to English!"
         await callback_query.message.edit_text(msg, parse_mode="HTML")
     await callback_query.answer()
@@ -462,7 +489,7 @@ async def process_ui_language_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data and c.data.startswith("change_ui_lang"))
 async def change_ui_lang_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     ui_lang = prefs.get("ui_language", "es")
     msg = "Selecciona idioma de interfaz:" if ui_lang == "es" else "Select UI language:"
     await callback_query.message.edit_text(msg, reply_markup=create_ui_language_keyboard(), parse_mode="HTML")
@@ -474,7 +501,7 @@ async def process_language_callback(callback_query: types.CallbackQuery):
     lang_code = callback_query.data.split("_")[1]
     user_id = callback_query.from_user.id
     if lang_code in SUPPORTED_LANGUAGES:
-        user_preferences[user_id]["language"] = lang_code
+        set_preference(user_id,"language",lang_code)
         lang_info = SUPPORTED_LANGUAGES[lang_code]
         await callback_query.message.edit_text(
             f"✅ {lang_info['flag']} {lang_info['name']}\n🎙️ ¡Envía un mensaje de voz!",
@@ -488,7 +515,7 @@ async def process_mode_callback(callback_query: types.CallbackQuery):
     mode = callback_query.data.split("_")[1]
     user_id = callback_query.from_user.id
     if mode in PROCESSING_MODES:
-        user_preferences[user_id]["mode"] = mode
+        set_preference(user_id,"mode",mode)
         mode_info = PROCESSING_MODES[mode]
         await callback_query.message.edit_text(f"✅ {mode_info['icon']} {mode_info['name']}\n🎙️ Ready!", parse_mode="HTML")
     await callback_query.answer()
@@ -497,7 +524,7 @@ async def process_mode_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "change_lang")
 async def change_lang_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     current_lang_info = SUPPORTED_LANGUAGES[prefs["language"]]
     await callback_query.message.edit_text(
         f"🌐 Actual: {current_lang_info['flag']} {current_lang_info['name']}\n👇 Select:",
@@ -510,7 +537,7 @@ async def change_lang_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "change_mode")
 async def change_mode_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     mode_info = PROCESSING_MODES[prefs["mode"]]
     await callback_query.message.edit_text(
         f"⚡ Actual: {mode_info['icon']} {mode_info['name']}\n👇 Select:",
@@ -523,7 +550,7 @@ async def change_mode_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "toggle_stats")
 async def toggle_stats_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    user_preferences[user_id]["show_stats"] = not user_preferences[user_id]["show_stats"]
+    set_preference(user_id,"show_stats",not preferences(user_id)["show_stats"])
     await callback_query.message.edit_reply_markup(reply_markup=create_settings_keyboard(user_id))
     await callback_query.answer()
 
@@ -531,7 +558,7 @@ async def toggle_stats_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "toggle_timestamps")
 async def toggle_timestamps_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    user_preferences[user_id]["timestamps"] = not user_preferences[user_id]["timestamps"]
+    set_preference(user_id,"timestamps",not preferences(user_id)["timestamps"])
     await callback_query.message.edit_reply_markup(reply_markup=create_settings_keyboard(user_id))
     await callback_query.answer()
 
@@ -560,7 +587,7 @@ async def retry_callback(callback_query: types.CallbackQuery):
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
     user_id = message.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
 
     # Duplicate guard: same (user_id, file_id) within 60s = skip
     file_id = message.voice.file_id
@@ -578,7 +605,7 @@ async def handle_voice(message: types.Message):
 
     # Telegram API expects business_connection_id as string when editing messages in business context
     business_connection_id = getattr(message, "business_connection_id", None)
-    await audio_queue.put((user_id, file_id, file_path, business_connection_id))
+    await audio_queue.put((user_id, file_id, file_path, business_connection_id, prefs))
 
 
 # --- Helpers ---
@@ -807,11 +834,11 @@ async def process_audio_chunk(
 
 
 async def process_audio_async(
-    user_id: int, file_id: str, file_path: str, business_connection_id=None
+    user_id: int, file_id: str, file_path: str, business_connection_id=None, prefs=None
 ):
     """Main audio processing with Whisper API."""
     wav_path = Path(file_path).with_suffix(".wav")
-    prefs = user_preferences[user_id]
+    prefs = prefs or preferences(user_id)
     progress_msg_id = None
     queued_for_later = False  # when True, do not delete file_path in finally (pending worker will process it)
 
@@ -905,7 +932,7 @@ async def process_audio_async(
                     Path(segment).unlink(missing_ok=True)
 
         if gpu_busy_raised:
-            pending_list.append((user_id, file_id, file_path, business_connection_id))
+            pending_list.append((user_id, file_id, file_path, business_connection_id, prefs))
             save_pending_queue()
             if wav_path.exists():
                 wav_path.unlink(missing_ok=True)
@@ -987,7 +1014,7 @@ async def process_audio_async(
             await send_message_safe(user_id, stats_msg, parse_mode="HTML")
 
     except WhisperBusyError:
-        pending_list.append((user_id, file_id, file_path, business_connection_id))
+        pending_list.append((user_id, file_id, file_path, business_connection_id, prefs))
         save_pending_queue()
         if wav_path.exists():
             wav_path.unlink(missing_ok=True)
@@ -1058,11 +1085,11 @@ async def pending_worker():
                 continue
             item = pending_list.pop(0)
             save_pending_queue()
-            user_id, file_id, file_path, business_connection_id = item
+            user_id, file_id, file_path, business_connection_id, prefs = item
             if not Path(file_path).exists():
                 logging.warning("Pending audio file no longer exists: %s", file_path)
                 continue
-            await audio_queue.put((user_id, file_id, file_path, business_connection_id))
+            await audio_queue.put((user_id, file_id, file_path, business_connection_id, prefs))
             logging.info("Moved queued audio %s to main queue (VRAM free)", file_id)
         except asyncio.CancelledError:
             break
@@ -1074,13 +1101,7 @@ async def audio_worker():
     while True:
         try:
             item = await audio_queue.get()
-            # Support both (user_id, file_id, file_path) and (user_id, file_id, file_path, business_connection_id)
-            if len(item) == 4:
-                user_id, file_id, file_path, business_connection_id = item
-            else:
-                user_id, file_id, file_path = item
-                business_connection_id = None
-            await process_audio_async(user_id, file_id, file_path, business_connection_id)
+            await process_audio_async(*item)
         except Exception as e:
             logging.error(f"Error in audio worker: {e}")
             await asyncio.sleep(1)

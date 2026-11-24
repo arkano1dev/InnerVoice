@@ -1,0 +1,5 @@
+*
+!whisper_server.py
+!Dockerfile
+!Dockerfile.faster
+!requirements-service.txt

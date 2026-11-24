@@ -1,9 +1,8 @@
 FROM python:3.12-slim
-
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY legacy.py .
-
+COPY legacy.py jobs.py telemetry.py sessions.py server.py ./
 USER 65534:65534
-CMD ["gunicorn", "--bind", "0.0.0.0:9000", "--workers", "1", "--threads", "8", "legacy:app"]
+CMD ["python", "server.py"]
