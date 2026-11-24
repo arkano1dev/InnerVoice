@@ -15,6 +15,7 @@ import ssl
 import shutil
 import sqlite3
 import subprocess
+import stat
 import sys
 import tempfile
 import time
@@ -352,8 +353,21 @@ def compose(cfg,*args,capture=False):
     files = ["-f","docker-compose.yml","-f","compose.private.yml"]
     if cfg["deployment"].get("telegram"):
         files += ["-f","compose.telegram.yml"]
-    return subprocess.run(["docker","compose",*files,*args],
-                          cwd=REPO,env=env(cfg),check=True,capture_output=capture,text=True)
+    command = ["docker", "compose", *files]
+    environment = env(cfg)
+    if args[0] == "up":
+        # Read the effective device mapping, including overrides from Compose's .env.
+        config = subprocess.run([*command, "config", "--format", "json", "whisper"],
+                                cwd=REPO, env=environment, check=True, capture_output=True, text=True)
+        worker = json.loads(config.stdout)["services"]["whisper"]
+        if worker["group_add"] == ["render"]:
+            node = next(device["source"] for device in worker["devices"] if device["target"] != "/dev/kfd")
+            device_stat = Path(node).stat()
+            if not stat.S_ISCHR(device_stat.st_mode) or device_stat.st_gid == 0:
+                raise ValueError(f"Expected a GPU character device with a dedicated non-root group at {node}")
+            environment["WHISPER_RENDER_GROUP"] = str(device_stat.st_gid)
+    return subprocess.run([*command, *args], cwd=REPO, env=environment, check=True,
+                          capture_output=capture, text=True)
 
 
 def weight_digest(weights):

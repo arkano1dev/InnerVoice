@@ -55,10 +55,7 @@ A GPU reported by `/gpu-check` can still fail when PyTorch first allocates or
 runs on it. If Gunicorn replaces a worker with exit status 139, reproduce the
 failure with a small tensor before testing audio. If the previous deployment
 used a graphics target override, supply its effective
-`HSA_OVERRIDE_GFX_VERSION` in the operator shell or protected `.env`. If
-Docker cannot resolve the `render` group in the worker image, set
-`WHISPER_RENDER_GROUP` to the owning numeric GID of the intended
-`/dev/dri/renderD*` device on the host.
+`HSA_OVERRIDE_GFX_VERSION` in the operator shell or protected `.env`. The private launcher resolves the default `render` group to the host render node’s numeric GID before starting Whisper.
 
 For a Docker-only bot smoke test with the previous runtime settings, add
 `compose.rocm-compat.yml` explicitly. This overlay disables seccomp filtering for
@@ -319,7 +316,7 @@ TELEGRAM_USER_ID=<single authorized positive numeric user ID>
 
 The CLI provisions a separate random bot-to-Gateway bearer. Only the bot and Gateway receive it. They communicate through a local Unix socket. The worker is on an internal network. Only the private HTTPS port is published. The Gateway ingress bridge disables IP masquerading. Enforce destination-specific egress at the host or network boundary for explicitly routed networks and for the desktop and Telegram bridge. Permit the workstation to reach the configured Gateway address and TLS port, and permit the standalone bot to reach the Telegram Bot API over HTTPS and the configured DNS resolver. Apply equivalent IPv6 rules if enabled. No bot port is published. To disable the standalone bot, set `deployment.telegram=false` and restart.
 
-For ROCm the default render node is `/dev/dri/renderD128`. If needed, set `IV_RENDER_NODE` and the numeric `WHISPER_RENDER_GROUP` for the selected node. The service identity must be able to read the weights and access both that node and `/dev/kfd`.
+For ROCm the default render node is `/dev/dri/renderD128`. Set `IV_RENDER_NODE` to select another render node. The launcher detects its owning group automatically. An explicit numeric `WHISPER_RENDER_GROUP` overrides detection. The service identity must be able to read the weights and access both that node and `/dev/kfd`.
 
 On upgrade, stop and drain the earlier version. Inspect its state directory and previous Compose audio volume (normally named with the project prefix and `audio_temp`). Existing audio there, in backups or in old containers is outside the new RAM spool. Review it before deletion. Leave the jobs database and desktop history in place.
 

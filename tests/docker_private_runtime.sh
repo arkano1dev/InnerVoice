@@ -40,6 +40,9 @@ cleanup() {
 }
 trap cleanup EXIT
 [[ "$("${base[@]}" config --services | sort | xargs)" == 'gateway whisper' ]]
+# Exercise the exact Compose JSON fields used to derive the GPU group on ROCm hosts.
+IV_RENDER_NODE=/dev/dri/renderD129 WHISPER_RENDER_GROUP=render "${base[@]}" config --format json whisper |
+  python3 -c 'import json,sys; w=json.load(sys.stdin)["services"]["whisper"]; assert w["group_add"] == ["render"]; assert [d["source"] for d in w["devices"] if d["target"] != "/dev/kfd"] == ["/dev/dri/renderD129"]'
 "${stack[@]}" build gateway bot
 "${stack[@]}" up -d --no-build --pull never
 port=$("${stack[@]}" port gateway 9443 | awk -F: '{print $NF}')
