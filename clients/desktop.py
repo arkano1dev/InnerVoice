@@ -74,8 +74,8 @@ def network(cfg, directory, key, events, finished):
     path = None
     while True:
         try:
-            files = sorted(directory.glob("*.raw"))
             done = finished.is_set()
+            files = sorted(directory.glob("*.raw"))
             ready = [p for p in files if p.stat().st_size == BLOCK or (done and p.stat().st_size >= 2)]
             if path is None and not ready:
                 if done:
