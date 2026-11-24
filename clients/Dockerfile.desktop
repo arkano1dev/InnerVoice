@@ -1,16 +1,14 @@
-FROM debian:bookworm-slim
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libasound2-plugins libportaudio2 python3-pyqt5 python3-venv qtwayland5 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN python3 -m venv --system-site-packages /opt/innervoice \
-    && /opt/innervoice/bin/python -m pip install --no-cache-dir \
-       requests sounddevice
-RUN printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf
-
-ENV HOME=/home/innervoice PYTHONUNBUFFERED=1
+FROM alpine:3.24
+RUN apk add --no-cache ca-certificates python3 py3-qt5 qt5-qtwayland py3-requests \
+      py3-cffi portaudio alsa-plugins-pulse && \
+    apk add --no-cache --virtual .installer py3-pip && \
+    python3 -m pip install --no-cache-dir --no-deps --target=/opt/innervoice/lib sounddevice && \
+    apk del .installer && mkdir -p /opt/innervoice/bin && \
+    ln -s /usr/bin/python3 /opt/innervoice/bin/python && \
+    printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf
+ENV HOME=/home/innervoice PYTHONPATH=/opt/innervoice/lib PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY desktop.py provider.py recording_storage.py ./
+USER 65534:65534
 ENTRYPOINT ["/opt/innervoice/bin/python", "/app/desktop.py"]
 CMD ["run"]

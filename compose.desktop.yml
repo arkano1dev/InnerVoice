@@ -4,6 +4,7 @@ services:
       context: ./clients
       dockerfile: Dockerfile.desktop
     user: "${IV_DESKTOP_UID:?}:${IV_DESKTOP_GID:?}"
+    read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     init: true
@@ -15,8 +16,10 @@ services:
       XDG_RUNTIME_DIR: /run/innervoice-runtime
       WAYLAND_DISPLAY: /run/innervoice/wayland
       QT_QPA_PLATFORM: wayland
+      XDG_CACHE_HOME: /tmp/cache
       PULSE_SERVER: unix:/run/innervoice/pulse/native
     tmpfs:
+      - "/tmp:size=32m,mode=1777"
       - "/run/innervoice-runtime:mode=0700,uid=${IV_DESKTOP_UID:?},gid=${IV_DESKTOP_GID:?}"
     volumes:
       - type: bind
@@ -34,6 +37,7 @@ services:
       - type: bind
         source: "${IV_DESKTOP_CONFIG:?}"
         target: /home/innervoice/.config/innervoice-desktop
+        read_only: true
         bind:
           create_host_path: false
       - type: bind

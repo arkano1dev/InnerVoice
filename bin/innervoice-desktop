@@ -70,7 +70,7 @@ if [[ "$action" == setup || "$action" == start ]]; then
     fi
     install -d -m 700 "$IV_DESKTOP_CONFIG" "$IV_DESKTOP_STATE"
     if [[ "$action" == setup ]]; then
-        "${compose[@]}" run --rm --build desktop setup
+        "${compose[@]}" run --rm --build --volume "$IV_DESKTOP_CONFIG:/home/innervoice/.config/innervoice-desktop:rw" desktop setup
         umask 077
         temp_mode=$(mktemp "$IV_DESKTOP_CONFIG/.network-mode.XXXXXX")
         printf '%s\n' "$mode" > "$temp_mode"

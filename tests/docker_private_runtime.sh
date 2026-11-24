@@ -90,6 +90,21 @@ for attempt in range(30):
     time.sleep(1)
 else:
     raise RuntimeError("Synthetic session did not finish")
+# Full-file clients also pass through multipart spooling and the packaged FFmpeg decoder.
+boundary = secrets.token_hex(16)
+part = (f'--{boundary}\r\nContent-Disposition: form-data; name="audio"; filename="note.wav"\r\n'
+        'Content-Type: audio/wav\r\n\r\n').encode() + audio.getvalue() + f'\r\n--{boundary}--\r\n'.encode()
+code, job = call("POST","/v1/jobs",headers | {"Idempotency-Key":"file-fixture",
+                 "Content-Type":"multipart/form-data; boundary="+boundary},part)
+assert code == 202, (code,job)
+for attempt in range(35):
+    result = call("GET",job["status_url"],headers)[1]
+    if result["state"] == "succeeded":
+        assert result["result"]["text"] == "synthetic recording"
+        break
+    time.sleep(1)
+else:
+    raise RuntimeError("Full-file fixture did not finish")
 rotate(secrets.token_hex(32))
 assert call("GET",path,headers)[0]==401
 assert not any(f.suffix in (".pcm",".upload",".part",".wav") for f in Path(os.environ["IV_DATA"]).iterdir())
@@ -149,8 +164,12 @@ with socket.socket() as host:
                     address,str(port)], check=True)
 FIREWALL
   done
+  docker build -f clients/Dockerfile.desktop -t "$COMPOSE_PROJECT_NAME-desktop" clients
+  docker run --rm --network none --read-only --cap-drop ALL --tmpfs /tmp \
+    --env QT_QPA_PLATFORM=offscreen --entrypoint /opt/innervoice/bin/python "$COMPOSE_PROJECT_NAME-desktop" \
+    -c 'import os, sounddevice, requests; from PyQt5.QtWidgets import QApplication; app=QApplication([]); assert os.geteuid()>0'
   result=0
-  for image in "$COMPOSE_PROJECT_NAME-gateway" "$COMPOSE_PROJECT_NAME-bot"; do
+  for image in "$COMPOSE_PROJECT_NAME-gateway" "$COMPOSE_PROJECT_NAME-bot" "$COMPOSE_PROJECT_NAME-desktop"; do
     "$IV_TEST_SCANNER" "docker:$image" --fail-on high || result=1
   done
   exit "$result"
