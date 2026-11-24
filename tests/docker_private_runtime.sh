@@ -165,8 +165,8 @@ with socket.socket() as host:
 FIREWALL
   done
   docker build -f clients/Dockerfile.desktop -t "$COMPOSE_PROJECT_NAME-desktop" clients
-  bash tests/docker_desktop_runtime.sh "$COMPOSE_PROJECT_NAME-desktop"
   result=0
+  bash tests/docker_desktop_runtime.sh "$COMPOSE_PROJECT_NAME-desktop" || result=1
   for image in "$COMPOSE_PROJECT_NAME-gateway" "$COMPOSE_PROJECT_NAME-bot" "$COMPOSE_PROJECT_NAME-desktop"; do
     "$IV_TEST_SCANNER" "docker:$image" --fail-on high || result=1
   done

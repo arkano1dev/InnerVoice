@@ -76,6 +76,7 @@ try:
         assert event not in ("capture_error", "play_error"), (event, value)
         if event == "play_end":
             break
+    print("Wayland window, capture and playback passed", flush=True)
 finally:
     ui.send_signal(signal.SIGTERM)
     assert ui.wait(timeout=10) == 0

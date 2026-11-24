@@ -254,6 +254,8 @@ Press the shortcut once to record and again to stop. Existing shortcuts keep the
 The preview lists eligible folders. Applying removes only numbered audio fragments from completed takes outside the newest ten audio recordings. Transcripts and pending takes are retained. The menu limit itself never deletes audio.
 
 
+The Docker recorder uses Qt 6 on Wolfi. It captures and plays audio through the mounted Pulse socket using PortAudio and the ALSA Pulse plugin. CI exercises the window on a headless Wayland compositor and tests both directions against a synthetic audio device.
+
 For acceptance, with another Wayland app focused, record a five-second note with the shortcut and stop it with the same shortcut. Verify that text appears in the editor and can be copied into the other app. Repeat on your normal microphone and private network. Run the lightweight regression tests with `python3 -m unittest discover -s tests -v` from the checkout with `requests` and PyQt5 installed so the editor test runs.
 
 #### Mesh VPN works on the workstation but times out in the container

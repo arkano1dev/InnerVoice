@@ -834,7 +834,7 @@ def graphical(listener):
     timer = QTimer()
     timer.timeout.connect(poll)
     timer.start(700)
-    handlers = {sig: signal.signal(sig, lambda *_: app.quit()) for sig in (signal.SIGTERM, signal.SIGINT)}
+    handlers = {sig: signal.signal(sig, lambda *_: app.exit(0)) for sig in (signal.SIGTERM, signal.SIGINT)}
     notifier = None
     if isinstance(listener, socket.socket):
         notifier = QSocketNotifier(listener.fileno(), QSocketNotifier.Read)
@@ -863,7 +863,10 @@ def graphical(listener):
     root.windowHandle().screenChanged.connect(screen_changed)
     fit_text()
     try:
-        app.exec_()
+        if os.environ.get("IV_DESKTOP_QT") == "6":
+            app.exec()
+        else:
+            app.exec_()
     finally:
         stop.set()
         playback_cancel.set()
