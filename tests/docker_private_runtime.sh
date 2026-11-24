@@ -108,6 +108,11 @@ async def check():
             assert result.status == 401
         async with session.get("http://localhost/health") as result:
             assert result.status == 200 and (await result.json())["status"] == "healthy"
+    await bot.sync_preferences({"language":"en"})
+    assert bot.preferences(bot.AUTHORIZED_USER)["language"] == "en"
+    bot.overrides.clear()
+    await bot.sync_preferences()
+    assert bot.preferences(bot.AUTHORIZED_USER)["language"] == "en"
     from types import SimpleNamespace
     for uid, chat_type, expected in ((bot.AUTHORIZED_USER,"private",True), (bot.AUTHORIZED_USER+1,"private",False), (bot.AUTHORIZED_USER,"group",False)):
         event = SimpleNamespace(from_user=SimpleNamespace(id=uid), chat=SimpleNamespace(type=chat_type))
@@ -125,6 +130,25 @@ PY
 [[ -z "$("${stack[@]}" exec -T gateway sh -c 'find /tmp -name "*.pcm" -print -quit')" ]]
 
 if [[ -n "${IV_TEST_SCANNER:-}" ]]; then
+  # Both egress bridges must block new connections to a listening host port.
+  for pair in gateway:ingressnet bot:botegress; do
+    svc=${pair%:*}
+    cid=$("${stack[@]}" ps -q "$svc")
+    bridge_ip=$(docker inspect "$cid" | python3 -c 'import json,sys; print(next(v["Gateway"] for k,v in json.load(sys.stdin)[0]["NetworkSettings"]["Networks"].items() if k.lower().endswith("_"+sys.argv[1])))' "${pair#*:}")
+    python3 - "$cid" "$bridge_ip" <<'FIREWALL'
+import socket, subprocess, sys
+cid, address = sys.argv[1:]
+with socket.socket() as host:
+    host.bind((address, 0))
+    host.listen()
+    port = host.getsockname()[1]
+    with socket.create_connection((address, port), timeout=2):
+        pass
+    subprocess.run(["docker","exec",cid,"python","-c",
+                    "import socket,sys; s=socket.socket(); s.settimeout(2); assert s.connect_ex((sys.argv[1],int(sys.argv[2]))) != 0",
+                    address,str(port)], check=True)
+FIREWALL
+  done
   result=0
   for image in "$COMPOSE_PROJECT_NAME-gateway" "$COMPOSE_PROJECT_NAME-bot"; do
     "$IV_TEST_SCANNER" "docker:$image" --only-fixed --fail-on high || result=1

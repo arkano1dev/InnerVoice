@@ -87,6 +87,9 @@ def validate(cfg):
     for k in ("data","secrets"):
         if not Path(d[k]).is_absolute():
             raise ValueError("Use absolute data and secret directories")
+    state, secrets_dir = (Path(d[k]).resolve() for k in ("data", "secrets"))
+    if state == secrets_dir or state in secrets_dir.parents or secrets_dir in state.parents:
+        raise ValueError("Choose separate state and secret directories")
     for engine in ENGINES:
         profile=cfg[engine]
         if profile["model"] not in MODELS:
@@ -403,9 +406,16 @@ def check_clients(path):
 
 
 
+def private_directory(path):
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = path.stat()
+    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+        raise ValueError(f"{path} must belong to the service account and have mode 0700")
+
+
 def publish_registry(source):
     directory = HOME/"gateway-access"
-    directory.mkdir(mode=0o700, exist_ok=True)
+    private_directory(directory)
     atomic(directory/"clients.json", source.read_bytes())
 
 
@@ -416,9 +426,9 @@ def preflight(cfg):
     if len(Path("/proc/swaps").read_text().splitlines()) > 1:
         raise ValueError("Disable swap on the Docker host before processing private audio")
     if d.get("telegram"):
-        (HOME/"telegram-socket").mkdir(mode=0o700, exist_ok=True)
+        private_directory(HOME/"telegram-socket")
         folder = HOME/"telegram"
-        folder.mkdir(mode=0o700, exist_ok=True)
+        private_directory(folder)
         if not (folder/"gateway-bearer").exists():
             atomic(folder/"gateway-bearer", secrets.token_urlsafe(48).encode())
     p=cfg[d["engine"]]
@@ -437,11 +447,14 @@ def preflight(cfg):
     if weight_digest(weights)!=p["digest"]:
         raise ValueError("The weights have changed. Verify the checkpoint before updating its saved digest.")
     secret_dir = Path(d["secrets"])
+    private_directory(secret_dir)
+    if (secret_dir/"tls.key").stat().st_mode & 0o077:
+        raise ValueError("Restrict the Gateway TLS private key to the service account")
     check_tls(secret_dir, d["bind"])
     check_clients(secret_dir/"clients.json")
     publish_registry(secret_dir/"clients.json")
     state = Path(d["data"])
-    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_directory(state)
     if any(f.suffix in (".pcm", ".upload", ".part") for f in state.iterdir()):
         raise ValueError("Earlier audio spool files exist. Drain the previous deployment and review its state before upgrading.")
 
@@ -586,8 +599,13 @@ def operate(args):
         return
     compose(cfg,"up","-d",*(["--force-recreate"] if args.cmd=="restart" else []),"--no-build","--pull","never","--remove-orphans")
     print("Waiting for the Gateway and Whisper to respond…", flush=True)
-    probe=("import requests; h=requests.get('http://whisper:9000/health',timeout=7).json(); "
-           "g=requests.get('http://whisper:9000/gpu-check',timeout=7).json(); "
+    probe=("import requests,socket,ssl; c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); "
+           "c.check_hostname=False; c.verify_mode=ssl.CERT_NONE; "
+           "s=c.wrap_socket(socket.create_connection(('127.0.0.1',9443),3)); "
+           "pem=open('/run/innervoice/tls.crt').read().split('-----END CERTIFICATE-----')[0]+'-----END CERTIFICATE-----'; "
+           "assert s.getpeercert(binary_form=True)==ssl.PEM_cert_to_DER_cert(pem); s.close(); "
+           "client=requests.Session(); client.trust_env=False; h=client.get('http://whisper:9000/health',timeout=7).json(); "
+           "g=client.get('http://whisper:9000/gpu-check',timeout=7).json(); "
            "print(h['engine'],h['model'],h['profile'],g['gpu'].get('available',False))")
     expected=" ".join((cfg["deployment"]["engine"],cfg[cfg["deployment"]["engine"]]["model"],env(cfg)["IV_REVISION"],"True"))
     for _ in range(30):

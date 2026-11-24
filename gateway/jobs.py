@@ -68,6 +68,7 @@ def initialize():
         if db.execute("PRAGMA user_version").fetchone()[0] not in (0,1):
             raise RuntimeError("Unsupported database schema")
         db.executescript("""
+        CREATE TABLE IF NOT EXISTS bot_preferences(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS jobs(
             id TEXT PRIMARY KEY, owner TEXT NOT NULL, replay TEXT NOT NULL, digest TEXT,
             profile TEXT NOT NULL, state TEXT NOT NULL, created REAL NOT NULL, finished REAL,

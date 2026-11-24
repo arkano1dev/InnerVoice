@@ -2,6 +2,7 @@
 
 import os
 import hmac
+import json
 from pathlib import Path
 from contextlib import contextmanager
 from threading import BoundedSemaphore, Condition
@@ -46,6 +47,30 @@ def authenticate_bot():
     supplied = request.headers.get("Authorization", "").encode()
     if not token or not hmac.compare_digest(supplied, b"Bearer " + token):
         return jsonify(error="unauthorized"), 401
+
+
+@app.route("/preferences", methods=["GET", "PATCH"])
+def preferences():
+    from jobs import database
+    choices = {"ui_language": ("en", "es"), "language": ("es","en","fr","nl","pt","it","ja","zh"),
+               "mode": ("fast","full"), "timestamps": (True, False), "show_stats": (True, False)}
+    changes = None
+    if request.method == "PATCH":
+        if request.content_length is None or request.content_length > 512:
+            return jsonify(error="invalid_preferences"), 400
+        changes = request.get_json(silent=True)
+        if not isinstance(changes, dict) or any(
+            key not in choices or type(value) is not type(choices[key][0]) or value not in choices[key]
+            for key, value in changes.items()
+        ):
+            return jsonify(error="invalid_preferences"), 400
+    with database() as db:
+        if changes == {}:
+            db.execute("DELETE FROM bot_preferences")
+        elif changes:
+            db.executemany("INSERT OR REPLACE INTO bot_preferences VALUES(?,?)",
+                           [(key, json.dumps(value)) for key,value in changes.items()])
+        return jsonify({key: json.loads(value) for key,value in db.execute("SELECT key,value FROM bot_preferences")})
 
 
 def forward(path, *, timeout):
