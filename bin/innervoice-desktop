@@ -3,31 +3,30 @@ set -euo pipefail
 
 action=${1:-}
 case "$action" in
-    setup|start|status|logs|stop) ;;
-    *) echo "Usage: $0 setup|start|status|logs|stop" >&2; exit 2 ;;
+    setup|start|toggle|shortcut|status|logs|stop) ;;
+    *) echo "Usage: $0 setup|start|toggle|shortcut|status|logs|stop" >&2; exit 2 ;;
 esac
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ "$action" == shortcut ]]; then
+    printf '"%s/bin/innervoice-desktop" toggle\n' "$repo_dir"
+    exit
+fi
 export IV_DESKTOP_UID=$(id -u)
 export IV_DESKTOP_GID=$(id -g)
-# X11 authorization cookies can be scoped to the workstation hostname.
-export IV_DESKTOP_HOSTNAME=$(hostname)
 runtime_dir=${XDG_RUNTIME_DIR:-/run/user/$IV_DESKTOP_UID}
-export IV_DESKTOP_XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}
-if [[ ! -r "$IV_DESKTOP_XAUTHORITY" && -z "${XAUTHORITY:-}" && -r "$runtime_dir/gdm/Xauthority" ]]; then
-    IV_DESKTOP_XAUTHORITY=$runtime_dir/gdm/Xauthority
-fi
+display=${WAYLAND_DISPLAY:-wayland-0}
+case "$display" in
+    /*) export IV_DESKTOP_WAYLAND_SOCKET=$display ;;
+    *) export IV_DESKTOP_WAYLAND_SOCKET=$runtime_dir/$display ;;
+esac
 export IV_DESKTOP_PULSE=$runtime_dir/pulse
 export IV_DESKTOP_CONFIG=$HOME/.config/innervoice-desktop
 export IV_DESKTOP_STATE=$HOME/.local/state/innervoice-desktop
 
 compose=(docker compose --env-file /dev/null -p innervoice-desktop -f "$repo_dir/compose.desktop.yml")
 if [[ "$action" == setup || "$action" == start ]]; then
-    if [[ "${XDG_SESSION_TYPE:-x11}" != x11 || ! "${DISPLAY:-}" =~ ^:[0-9]+(\.[0-9]+)?$ ]]; then
-        echo "Run this from a terminal in your local X11 desktop session." >&2
-        exit 1
-    fi
-    if [[ ! -r "$IV_DESKTOP_XAUTHORITY" ]]; then
-        echo "X11 authorization file is unreadable: $IV_DESKTOP_XAUTHORITY" >&2
+    if [[ "${XDG_SESSION_TYPE:-}" != wayland || ! -S "$IV_DESKTOP_WAYLAND_SOCKET" ]]; then
+        echo "Run this from your local Wayland desktop session. Display socket: $IV_DESKTOP_WAYLAND_SOCKET" >&2
         exit 1
     fi
     if [[ ! -S "$IV_DESKTOP_PULSE/native" ]]; then
@@ -42,11 +41,11 @@ if [[ "$action" == setup || "$action" == start ]]; then
         echo "Run $0 setup before starting the desktop client." >&2
         exit 1
     fi
-    exec "${compose[@]}" up -d desktop
+    exec "${compose[@]}" up -d --build desktop
 fi
 
-export DISPLAY=${DISPLAY:-:0}
 case "$action" in
+    toggle) exec "${compose[@]}" exec -T desktop /opt/innervoice/bin/python /app/desktop.py toggle ;;
     status) exec "${compose[@]}" ps -a desktop ;;
     logs) exec "${compose[@]}" logs -f --tail=80 desktop ;;
     stop) exec "${compose[@]}" stop desktop ;;

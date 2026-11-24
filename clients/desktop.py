@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Ubuntu graphical client. Capture, network, and UI use independent threads."""
+import fcntl
 import io
 import json
 import os
 from pathlib import Path
 import queue
 import secrets
+import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -28,6 +31,10 @@ def check_gateway(cfg):
         raise ValueError("Gateway needs the session API and 30-second fragment support")
 
 
+def wayland_session():
+    return os.environ.get("XDG_SESSION_TYPE") == "wayland" or os.environ.get("QT_QPA_PLATFORM") == "wayland"
+
+
 def setup():
     cfg=json.loads(CONFIG.read_bytes()) if CONFIG.exists() else {}
     ca = CONFIG.with_name("ca.crt")
@@ -35,11 +42,14 @@ def setup():
     for key, path in (("ca", ca), ("token_file", bearer)):
         if not Path(cfg.get(key) or ".").is_file() and path.is_file():
             cfg[key] = str(path)
-    for key,default in dict(url="",ca=str(ca) if ca.is_file() else "",
-                            token_file=str(bearer) if bearer.is_file() else "",source_ip="",source_port=0,
-                            hotkey="<ctrl>+<alt>+v",microphone="").items():
-        value=input(f"{key} [{cfg.get(key,default)}]: ").strip()
-        cfg[key]=value or cfg.get(key,default)
+    defaults = dict(url="", ca=str(ca) if ca.is_file() else "",
+                    token_file=str(bearer) if bearer.is_file() else "", source_ip="", source_port=0,
+                    microphone="")
+    if not wayland_session():
+        defaults["hotkey"] = "<ctrl>+<alt>+v"
+    for key, default in defaults.items():
+        value = input(f"{key} [{cfg.get(key, default)}]: ").strip()
+        cfg[key] = value or cfg.get(key, default)
     check_gateway(cfg)
     if cfg["ca"] and not Path(cfg["ca"]).is_file():
         raise ValueError("Missing CA file")
@@ -148,11 +158,51 @@ def focused():
     return None
 
 
-def graphical():
-    import tkinter as tk
-    from pynput.keyboard import GlobalHotKeys
-    cfg=json.loads(CONFIG.read_bytes())
-    HOME.mkdir(mode=0o700,parents=True,exist_ok=True)
+def send_toggle():
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+            client.sendto(b"toggle", str(HOME/"control.sock"))
+    except OSError:
+        sys.exit("The desktop client is not ready. Start it and check its status.")
+
+
+def read_shortcuts(listener, events):
+    while True:
+        try:
+            message = listener.recv(64)
+        except BlockingIOError:
+            return
+        if message == b"toggle":
+            events.put(("toggle", None))
+
+
+def run_graphical():
+    HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (HOME/"desktop.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit("The desktop client is already running.")
+        control = HOME/"control.sock"
+        control.unlink(missing_ok=True)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as listener:
+            listener.bind(str(control))
+            listener.setblocking(False)
+            try:
+                graphical(listener)
+            finally:
+                control.unlink(missing_ok=True)
+
+
+def graphical(listener):
+    from PyQt5.QtCore import QSignalBlocker, QTimer
+    from PyQt5.QtGui import QTextCursor
+    from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget
+
+    cfg = json.loads(CONFIG.read_bytes())
+    wayland = wayland_session()
+    if wayland:
+        os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
     pointer=HOME/"current"
     for old in HOME.iterdir():
         record=old/"editor.json"
@@ -164,12 +214,17 @@ def graphical():
                     item.unlink()
             if not any(old.iterdir()):
                 old.rmdir()
-    root=tk.Tk()
-    root.title("InnerVoice")
-    status=tk.StringVar(value="Ready to record")
-    tk.Label(root,textvariable=status).pack()
-    editor=tk.Text(root,width=65,height=12,wrap="word")
-    editor.pack()
+    app = QApplication([])
+    root = QWidget()
+    root.setWindowTitle("InnerVoice")
+    root.resize(620, 280)
+    layout = QVBoxLayout(root)
+    status = QLabel("Ready to record")
+    editor = QTextEdit()
+    layout.addWidget(status)
+    layout.addWidget(editor)
+    buttons = QHBoxLayout()
+    layout.addLayout(buttons)
     events=queue.Queue()
     directory=None
     state={}
@@ -182,19 +237,15 @@ def graphical():
 
     def save():
         if directory:
-            state["text"]=editor.get("1.0","end-1c")
+            state["text"]=editor.toPlainText()
             atomic(directory/"editor.json",json.dumps(state).encode())
 
-    def changed(_):
-        if editor.edit_modified():
-            save()
-            editor.edit_modified(False)
-    editor.bind("<<Modified>>",changed)
+    editor.textChanged.connect(save)
 
     def transfer():
         nonlocal transfer_active
         transfer_active = True
-        retry_button.configure(state="disabled")
+        retry_button.setEnabled(False)
         key = state.get("session_key", directory.name)
         threading.Thread(target=network, args=(cfg, directory, key, events, finished), daemon=True).start()
 
@@ -206,7 +257,7 @@ def graphical():
             state["session_key"] = secrets.token_hex(16)
             save()
             replace_session = False
-        status.set("Syncing saved audio")
+        status.setText("Syncing saved audio")
         transfer()
 
     def insert():
@@ -214,9 +265,9 @@ def graphical():
             return
         try:
             if focused()!=target:
-                status.set("Focus changed. Copy text from the editor.")
+                status.setText("Focus changed. Copy text from the editor.")
                 return
-            text=editor.get("1.0","end-1c")
+            text=editor.toPlainText()
             pos=target.queryText().caretOffset
             state["intent"]="pending"
             save()
@@ -224,36 +275,37 @@ def graphical():
                 raise ValueError()
             state["intent"]="inserted"
             save()
-            status.set("Inserted")
+            status.setText("Inserted")
         except Exception:
-            status.set("Insertion outcome unknown. Check the destination.")
+            status.setText("Insertion outcome unknown. Check the destination.")
 
     def toggle():
         nonlocal directory,state,working,target,stop,finished
         if working:
             if not stop.is_set():
                 stop.set()
-                status.set("Finishing recording")
+                status.setText("Finishing recording")
             return
         if directory and not state.get("ready"):
-            status.set("Recover the current recording first")
+            status.setText("Recover the current recording first")
             return
-        target=focused()
+        target = None if wayland else focused()
         directory=HOME/secrets.token_hex(16)
         directory.mkdir(mode=0o700)
         state={"applied":0,"ready":False}
-        editor.delete("1.0","end")
+        editor.clear()
         save()
         atomic(pointer,directory.name.encode())
         stop=threading.Event()
         finished=threading.Event()
         working=True
-        status.set("Recording")
+        status.setText("Recording")
         threading.Thread(target=capture,args=(directory,stop,events,cfg["microphone"]),daemon=True).start()
         transfer()
 
     def poll():
         nonlocal working, transfer_active, replace_session
+        read_shortcuts(listener, events)
         while not events.empty():
             kind,value=events.get()
             if kind=="toggle":
@@ -261,96 +313,115 @@ def graphical():
             elif kind=="stopped":
                 finished.set()
                 if transfer_active:
-                    status.set("Processing saved audio")
+                    status.setText("Processing saved audio")
                 else:
-                    retry_button.configure(state="normal")
+                    retry_button.setEnabled(True)
             elif kind=="segments":
                 for part in value:
                     if part["index"]==state["applied"]:
                         if part["text"]:
-                            editor.insert("end-1c",(" " if editor.get("1.0","end-1c") else "")+part["text"])
+                            with QSignalBlocker(editor):
+                                editor.moveCursor(QTextCursor.End)
+                                editor.insertPlainText((" " if editor.toPlainText() else "") + part["text"])
                         state["applied"]+=1
                         save()
             elif kind=="retry":
                 transfer_active = False
                 message, replace_session = value
-                status.set(message)
+                status.setText(message)
                 if finished.is_set():
-                    retry_button.configure(state="normal")
+                    retry_button.setEnabled(True)
             elif kind=="ready":
                 transfer_active = False
                 working=False
                 state["ready"]=True
                 save()
-                status.set(value)
-                retry_button.configure(state="disabled")
+                status.setText(value)
+                retry_button.setEnabled(False)
                 for fragment in directory.glob("*.raw"):
                     try:
                         fragment.unlink(missing_ok=True)
                     except OSError:
-                        status.set("Text saved. Local audio cleanup is pending.")
+                        status.setText("Text saved. Local audio cleanup is pending.")
                 insert()
             else:
-                status.set(value)
-        root.after(100,poll)
+                status.setText(value)
 
     def copy():
-        root.clipboard_clear()
-        root.clipboard_append(editor.get("1.0","end-1c"))
-    tk.Button(root,text="Start / Stop",command=toggle).pack(side="left")
-    tk.Button(root,text="Copy",command=copy).pack(side="right")
-    retry_button = tk.Button(root, text="Retry sync", command=retry, state="disabled")
-    retry_button.pack(side="left")
+        app.clipboard().setText(editor.toPlainText())
+
+    start_button = QPushButton("Start / Stop")
+    start_button.clicked.connect(toggle)
+    retry_button = QPushButton("Retry sync")
+    retry_button.setEnabled(False)
+    retry_button.clicked.connect(retry)
+    copy_button = QPushButton("Copy")
+    copy_button.clicked.connect(copy)
+    for button in (start_button, retry_button, copy_button):
+        buttons.addWidget(button)
     if pointer.exists():
         directory=HOME/pointer.read_text()
         state=json.loads((directory/"editor.json").read_bytes())
-        editor.insert("1.0",state.get("text",""))
+        editor.setPlainText(state.get("text", ""))
         if state.get("intent")=="pending":
-            status.set("Insertion outcome unknown. Check the destination.")
+            status.setText("Insertion outcome unknown. Check the destination.")
         elif not state["ready"]:
             working=True
             stop.set()
             finished.set()
-            status.set("Recovering saved recording")
+            status.setText("Recovering saved recording")
             transfer()
-    from PIL import Image,ImageDraw
-    import pystray
-    icon=Image.new("RGBA",(64,64),(0,0,0,0))
-    ImageDraw.Draw(icon).ellipse((8,8,56,56),fill="#287b94")
-    tray=pystray.Icon("InnerVoice",icon,"InnerVoice",menu=pystray.Menu(
-        pystray.MenuItem("Record / Stop",lambda *_:events.put(("toggle",None)))))
-    threading.Thread(target=tray.run,daemon=True).start()
-    status.trace_add("write",lambda *_:setattr(tray,"title","InnerVoice · "+status.get()))
-    hotkeys=GlobalHotKeys({cfg["hotkey"]:lambda:events.put(("toggle",None))})
-    hotkeys.start()
-    poll()
+    hotkeys = tray = None
+    if not wayland:
+        from pynput.keyboard import GlobalHotKeys
+        from PIL import Image, ImageDraw
+        import pystray
+
+        icon = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        ImageDraw.Draw(icon).ellipse((8, 8, 56, 56), fill="#287b94")
+        tray = pystray.Icon("InnerVoice", icon, "InnerVoice", menu=pystray.Menu(
+            pystray.MenuItem("Record / Stop", lambda *_: events.put(("toggle", None)))))
+        threading.Thread(target=tray.run, daemon=True).start()
+        hotkeys = GlobalHotKeys({cfg.get("hotkey", "<ctrl>+<alt>+v"): lambda: events.put(("toggle", None))})
+        hotkeys.start()
+    timer = QTimer()
+    timer.timeout.connect(poll)
+    timer.start(100)
+    handlers = {sig: signal.signal(sig, lambda *_: app.quit()) for sig in (signal.SIGTERM, signal.SIGINT)}
+    root.show()
     try:
-        root.mainloop()
+        app.exec_()
     finally:
         stop.set()
-        hotkeys.stop()
-        tray.stop()
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+        if hotkeys:
+            hotkeys.stop()
+        if tray:
+            tray.stop()
 
 
 def main():
     os.umask(0o077)
-    action=sys.argv[1]
+    action = sys.argv[1] if len(sys.argv) > 1 else ""
     if action=="setup":
         setup()
     elif action=="start":
-        if not os.environ.get("DISPLAY"):
-            sys.exit("Start in an X11 graphical session with microphone access.")
+        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            sys.exit("Start in a graphical desktop session with microphone access.")
         cmd=["systemd-run","--user","--unit="+UNIT,"--collect"]
-        for key in ("DISPLAY","XAUTHORITY","DBUS_SESSION_BUS_ADDRESS","XDG_RUNTIME_DIR","AT_SPI_BUS_ADDRESS"):
+        for key in ("DISPLAY","XAUTHORITY","DBUS_SESSION_BUS_ADDRESS","XDG_RUNTIME_DIR","AT_SPI_BUS_ADDRESS", "XDG_SESSION_TYPE", "WAYLAND_DISPLAY", "QT_QPA_PLATFORM"):
             if key in os.environ:
                 cmd.append("--setenv="+key+"="+os.environ[key])
         subprocess.run(cmd+[sys.executable,str(Path(__file__).resolve()),"run"],check=True)
     elif action in ("stop","status"):
         subprocess.run(["systemctl","--user",action,UNIT],check=True)
     elif action=="run":
-        graphical()
+        run_graphical()
+    elif action=="toggle":
+        send_toggle()
     else:
-        sys.exit("desktop setup|start|status|stop")
+        sys.exit("desktop setup|start|status|stop|run|toggle")
 
 
 if __name__=="__main__":

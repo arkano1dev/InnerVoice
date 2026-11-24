@@ -4,24 +4,21 @@ services:
       context: ./clients
       dockerfile: Dockerfile.desktop
     user: "${IV_DESKTOP_UID:?}:${IV_DESKTOP_GID:?}"
-    hostname: "${IV_DESKTOP_HOSTNAME:?}"
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     init: true
     environment:
-      DISPLAY: "${DISPLAY:?}"
-      XAUTHORITY: /run/innervoice/Xauthority
+      XDG_SESSION_TYPE: wayland
+      XDG_RUNTIME_DIR: /run/innervoice-runtime
+      WAYLAND_DISPLAY: /run/innervoice/wayland
+      QT_QPA_PLATFORM: wayland
       PULSE_SERVER: unix:/run/innervoice/pulse/native
+    tmpfs:
+      - "/run/innervoice-runtime:mode=0700,uid=${IV_DESKTOP_UID:?},gid=${IV_DESKTOP_GID:?}"
     volumes:
       - type: bind
-        source: /tmp/.X11-unix
-        target: /tmp/.X11-unix
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: "${IV_DESKTOP_XAUTHORITY:?}"
-        target: /run/innervoice/Xauthority
+        source: "${IV_DESKTOP_WAYLAND_SOCKET:?}"
+        target: /run/innervoice/wayland
         read_only: true
         bind:
           create_host_path: false

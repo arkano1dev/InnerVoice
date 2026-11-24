@@ -8,7 +8,7 @@
 | --- | --- |
 | Speak to my agent through Telegram | The agent's Telegram connector passes the note to the private Voice Gateway. The agent receives one final English result and handles the reply. See the [agent provider guide](docs/private-gateway.md#agent-connection) and [reference adapter](clients/provider.py). |
 | Get a transcript or translation in Telegram | The standalone InnerVoice bot sends the result back in your Telegram chat. See the [bot guide](DOCUMENTATION.md) and [current bot source](bot/bot.py). |
-| Dictate into a desktop app | The optional Ubuntu X11 client lets you start and stop with a shortcut, edit text as it arrives, and copy it or insert it when the original text field can still be verified. Run the client [in Docker](docs/private-gateway.md#run-the-desktop-client-in-docker) or [directly on Ubuntu](docs/private-gateway.md#run-directly-on-ubuntu). |
+| Dictate into a desktop app | The optional Ubuntu client lets you start and stop with a shortcut, edit text as it arrives, and copy the result. The Docker client uses Wayland. Run the client [in Docker](docs/private-gateway.md#run-the-desktop-client-in-docker) or [directly on Ubuntu](docs/private-gateway.md#run-directly-on-ubuntu). |
 
 The **Voice Gateway** accepts audio over private HTTPS, uses a shared Whisper worker and keeps track of work so accepted jobs can resume after an interruption. The standalone bot connects through a separate internal endpoint. The desktop client saves fragments locally so a recording can be recovered after an interruption.
 

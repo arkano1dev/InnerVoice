@@ -84,7 +84,7 @@ against the previous working image with the same operator settings.
 | --- | --- |
 | Agent with a Telegram connector | Give the agent its own Gateway identity and configure [the speech provider](#agent-connection) in the installed framework. The agent handles the Telegram event and receives one final UTF-8 prompt. Verify its silence, retry, timeout and external fallback settings. |
 | InnerVoice Telegram bot | Configure the bot token during server provisioning. Send `/start` and a voice note, then verify the bot's fast and full modes, preferences and timestamps. |
-| Ubuntu desktop | Follow [desktop setup](#desktop-role) to provision a separate identity and start the recorder under your X11 session. Press the hotkey to start and again to stop. If the original target cannot be verified, the edited text stays available in the editor. |
+| Ubuntu desktop | Follow [desktop setup](#desktop-role) to provision a separate identity and start the recorder from your graphical session. Press the hotkey to start and again to stop. If the original target cannot be verified, the edited text stays available in the editor. |
 
 ## CLI reference
 
@@ -197,24 +197,28 @@ Disable external fallback in the actual agent. The adapter opens its input read-
 
 ### Run the desktop client in Docker
 
-On the machine with the keyboard and microphone, open a terminal in your local X11 session. Use Docker Engine with Compose and a PulseAudio or PipeWire-Pulse session. The container uses the session's X11 cookie and audio socket. It captures locally, opens the editor and sends the audio over HTTPS to the server for inference. Use **Copy** in the editor to paste the returned text into another app.
+On the machine with the keyboard and microphone, open a graphical terminal in a local Wayland session. Use Docker Engine with Compose and PulseAudio or PipeWire-Pulse. The container uses the Wayland display socket and the session audio socket. It captures locally and sends audio over HTTPS to Whisper on the server. Use **Copy** in the editor to paste the result into another app.
 
 On the Gateway server, register a client with `./bin/innervoice credential --identity desktop-hotkey`, allow the workstation's source IP, and enable API jobs. On the workstation, put the public trust certificate in `~/.config/innervoice-desktop/ca.crt` and the matching bearer token in `~/.config/innervoice-desktop/bearer` with file mode `0600`. Then run these commands from the workstation's checkout:
 
 ```bash
 ./bin/innervoice-desktop setup
 ./bin/innervoice-desktop start
-./bin/innervoice-desktop status
+./bin/innervoice-desktop shortcut
 ```
 
-At setup, enter the Gateway HTTPS URL. Press Enter to accept the discovered certificate and bearer files, the default microphone and the default **Ctrl+Alt+V** hotkey. Press the hotkey once to record and again to finish. Use `./bin/innervoice-desktop logs` for container diagnostics and `./bin/innervoice-desktop stop` to stop it. Settings and saved recordings remain in the workstation's user directories across container restarts.
+At setup, enter the Gateway HTTPS URL and accept the discovered certificate and bearer files and the default microphone. The `shortcut` command prints the full command to register in your desktop settings. In Ubuntu GNOME, open **Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts**. Add **InnerVoice**, paste the printed command and assign **Ctrl+Alt+V** or another free combination. The compositor calls `toggle` in the running container.
+
+Press the shortcut once to record and again to stop. Use the editor's **Start / Stop** button to test capture before setting up the shortcut. Use `./bin/innervoice-desktop status`, `logs` or `stop` to manage the client. Settings and saved recordings survive container restarts.
+
+For acceptance, with another Wayland app focused, record a five-second note with the shortcut and stop it with the same shortcut. Verify that text appears in the editor and can be copied into the other app. Repeat on your normal microphone and private network. Run the lightweight regression tests with `python3 -m unittest discover -s tests -v` from the checkout when `requests` is installed.
 
 ### Run directly on Ubuntu
 
-On a graphical Ubuntu workstation install Python, Tk, PortAudio, the AT-SPI Python bindings, a microphone, and an X11 session supporting global shortcuts. The server and bot are independent. Run as the logged-in user:
+On a graphical Ubuntu workstation install Python, Qt, PortAudio and a microphone. The X11 mode also uses the AT-SPI bindings for insertion. The server and bot are independent. Run as the logged-in user:
 
 ```bash
-sudo apt install python3-venv python3-tk python3-pyatspi libportaudio2
+sudo apt install python3-venv python3-pyqt5 qtwayland5 python3-pyatspi libportaudio2
 python3 -m venv --system-site-packages "$HOME/.local/share/innervoice-desktop-env"
 . "$HOME/.local/share/innervoice-desktop-env/bin/activate"
 pip install requests tomli sounddevice pynput pystray Pillow
@@ -224,7 +228,7 @@ pip install requests tomli sounddevice pynput pystray Pillow
 ./bin/innervoice desktop stop
 ```
 
-Provision a separate desktop identity with the server CLI before setup. Set the private URL, trust root and token path. Leave source IP empty and port zero for OS selection. Press the selected hotkey to start, then press again to stop. The editor appends indexed text while preserving edits. On reconnect the client compares durable fragment indexes. On restart it recovers the saved capture. After recording stops, **Retry sync** resumes a failed transfer from saved audio. If the Gateway session expired or failed permanently, that action starts a replacement session while keeping edited text. Local fragments are removed after the editor has saved the result. Automatic insertion requires the same live editable accessibility object to be focused. Recovered captures have no live destination identity and remain in the editor. An uncertain insertion retains text for inspection and manual copy. Desktop stop affects only the user service. After stopping, archive or remove the user's config, state and virtual environment when decommissioning.
+Provision a separate desktop identity with the server CLI before setup. Set the private URL, trust root and token path. Leave source IP empty and port zero for OS selection. On Wayland, point a desktop custom shortcut to the virtual environment's Python interpreter followed by the absolute path to `clients/desktop.py` and the argument `toggle`. On X11, use the hotkey selected at setup. Press once to start and again to stop. The editor appends indexed text while preserving edits. On reconnect the client compares durable fragment indexes. On restart it recovers the saved capture. After recording stops, **Retry sync** resumes a failed transfer from saved audio. If the Gateway session expired or failed permanently, that action starts a replacement session while keeping edited text. Local fragments are removed after the editor has saved the result. On X11, automatic insertion requires the same live editable accessibility object to be focused. On Wayland, copy the result from the editor. Recovered captures have no live destination identity and remain in the editor. An uncertain insertion retains text for inspection and manual copy. Desktop stop affects only the user service. After stopping, archive or remove the user's config, state and virtual environment when decommissioning.
 
 GET /v1/capabilities advertises sessions. POST /v1/sessions with Idempotency-Key, PUT a mono 16 kHz signed 16-bit WAV to /v1/sessions/{id}/fragments/{index}, GET the session and POST /v1/sessions/{id}/finalize with last_index. Missing indexes are returned in a 409 response. A deliberate recover_prefix request may discard stored fragments beyond the contiguous prefix. Finalization returns a pollable job.
 
