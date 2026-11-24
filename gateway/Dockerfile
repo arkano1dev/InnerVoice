@@ -1,10 +1,15 @@
-FROM python:3.13-slim
+FROM cgr.dev/chainguard/wolfi-base AS runtime
+RUN apk add --no-cache ca-certificates python-3.13 ffmpeg-9.1
+ENV PATH=/opt/innervoice/bin:$PATH PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+
+FROM runtime AS dependencies
+RUN apk add --no-cache py3.13-pip && python3.13 -m venv --without-pip /opt/innervoice
 COPY requirements.txt .
-RUN python -m pip install --no-cache-dir --upgrade pip && \
-    python -m pip install --no-cache-dir -r requirements.txt && \
-    python -m pip uninstall -y setuptools wheel pip
+RUN /usr/bin/python3.13 -m pip --python /opt/innervoice install --no-cache-dir -r requirements.txt
+
+FROM runtime
+COPY --from=dependencies /opt/innervoice /opt/innervoice
 COPY access.py legacy.py jobs.py telemetry.py sessions.py server.py ./
 USER 65534:65534
 CMD ["python", "server.py"]
