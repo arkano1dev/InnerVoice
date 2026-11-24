@@ -37,16 +37,33 @@ def atomic(path,data):
         os.close(fd)
 
 
+def gateway_url(value):
+    base = value.rstrip("/")
+    url = urlsplit(base)
+    if (url.scheme != "https" or not url.hostname or url.username is not None
+            or url.password is not None or url.path or url.query or url.fragment
+            or url.port == 0 or any(char.isspace() for char in base)):
+        raise ValueError("Enter an HTTPS URL with the server address and port, without a path.")
+    return base
+
+
+def read_bearer(path):
+    if not path or not Path(path).is_file():
+        raise ValueError("Choose a readable bearer token file.")
+    value = Path(path).read_text().strip()
+    if not value or not value.isascii() or any(char.isspace() or not char.isprintable() for char in value):
+        raise ValueError("The bearer token file must contain one token.")
+    return value
+
+
 class Client:
-    def __init__(self,cfg):
-        self.base=cfg["url"].rstrip("/")
-        url=urlsplit(self.base)
-        if url.scheme!="https" or not url.hostname or url.username or url.password or url.path or url.query or url.fragment:
-            raise ValueError("Invalid private HTTPS endpoint")
+    def __init__(self, cfg, *, bearer=None):
+        self.base = gateway_url(cfg["url"])
         self.session=requests.Session()
         self.session.trust_env=False
         self.session.verify=cfg.get("ca") or True
-        self.session.headers["Authorization"]="Bearer "+Path(cfg["token_file"]).read_text().strip()
+        token = read_bearer(cfg.get("token_file")) if bearer is None else bearer
+        self.session.headers["Authorization"] = "Bearer " + token
         address=(cfg.get("source_ip") or "",int(cfg.get("source_port") or 0))
         if any(address):
             class Bound(HTTPAdapter):

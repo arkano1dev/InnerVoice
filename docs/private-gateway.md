@@ -199,7 +199,9 @@ Disable external fallback in the actual agent. The adapter opens its input read-
 
 On the machine with the keyboard and microphone, open a graphical terminal in a local Wayland session. Use Docker Engine with Compose and PulseAudio or PipeWire-Pulse. The container uses the Wayland display socket and the session audio socket. It captures locally and sends audio over HTTPS to Whisper on the server. Use **Copy** in the editor to paste the result into another app.
 
-On the Gateway server, register a client with `./bin/innervoice credential --identity desktop-hotkey`, allow the workstation's source IP, and enable API jobs. On the workstation, put the public trust certificate in `~/.config/innervoice-desktop/ca.crt` and the matching bearer token in `~/.config/innervoice-desktop/bearer` with file mode `0600`. Then run these commands from the workstation's checkout:
+On the Gateway server, register a client with `./bin/innervoice credential --identity desktop-hotkey`, allow the workstation's source IP, and enable API jobs. Keep the token you entered on the server. For a self-signed Gateway, copy its public `tls.crt` from the default server path `~/.config/innervoice/secrets/tls.crt` to `~/.config/innervoice-desktop/ca.crt` on the workstation. If the Gateway uses a private CA, copy that CA certificate instead. Use `system` at the trust prompt for a certificate trusted by the container's system trust store.
+
+Run these commands from the workstation's checkout:
 
 ```bash
 ./bin/innervoice-desktop setup
@@ -207,7 +209,7 @@ On the Gateway server, register a client with `./bin/innervoice credential --ide
 ./bin/innervoice-desktop shortcut
 ```
 
-At setup, enter the Gateway HTTPS URL and accept the discovered certificate and bearer files and the default microphone. The `shortcut` command prints the full command to register in your desktop settings. In Ubuntu GNOME, open **Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts**. Add **InnerVoice**, paste the printed command and assign **Ctrl+Alt+V** or another free combination. The compositor calls `toggle` in the running container.
+Enter the Gateway's full HTTPS URL and accept the suggested certificate path. Paste the registered token at the hidden prompt or reuse a local bearer file. The wizard checks TLS, the token, and support for desktop recording before saving. It uses the default microphone and retains advanced settings in an existing configuration. The wizard does not schedule an audio job; the first short recording verifies admission and inference. The `shortcut` command prints the full command to register in your desktop settings. In Ubuntu GNOME, open **Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts**. Add **InnerVoice**, paste the printed command and assign **Ctrl+Alt+V** or another free combination. The compositor calls `toggle` in the running container.
 
 Press the shortcut once to record and again to stop. Use the editor's **Start / Stop** button to test capture before setting up the shortcut. Use `./bin/innervoice-desktop status`, `logs` or `stop` to manage the client. Settings and saved recordings survive container restarts.
 

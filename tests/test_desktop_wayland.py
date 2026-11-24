@@ -1,4 +1,6 @@
+from contextlib import redirect_stdout
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -10,27 +12,80 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+import requests
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "clients"))
 import desktop
 
 
 class WaylandDesktopTests(unittest.TestCase):
-    def test_setup_leaves_shortcut_binding_to_desktop(self):
+    def test_setup_validates_connection_and_saves_hidden_token(self):
+        token = "t" * 40
+        caps = {"api_version": 1, "sessions": True, "fragment_seconds": 30}
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "settings.json"
+            certificate = config.with_name("ca.crt")
+            certificate.write_text("test certificate")
+            output = io.StringIO()
+
+            def request(session, method, url, **options):
+                self.assertEqual(method, "GET")
+                self.assertEqual(url, "https://100.100.10.2:9000/v1/capabilities")
+                self.assertEqual(session.headers["Authorization"], "Bearer " + token)
+                self.assertEqual(session.verify, str(certificate))
+                self.assertFalse(session.trust_env)
+                self.assertFalse(config.exists())
+                self.assertFalse(config.with_name("bearer").exists())
+                response = MagicMock(status_code=200)
+                response.json.return_value = caps
+                return response
+
             with (
                 patch.object(desktop, "CONFIG", config),
                 patch.dict(os.environ, {"XDG_SESSION_TYPE": "wayland"}),
-                patch.object(desktop, "check_gateway") as check,
-                patch("builtins.input", side_effect=["https://100.100.10.2:9000", "", "", "", "", ""]) as prompt,
+                patch.object(requests.Session, "request", autospec=True, side_effect=request),
+                patch("builtins.input", side_effect=["", "https://100.100.10.2:9000", "", "", "", ""]),
+                patch.object(desktop.getpass, "getpass", side_effect=["", token]),
+                redirect_stdout(output),
             ):
                 desktop.setup()
             saved = json.loads(config.read_text())
             self.assertNotIn("hotkey", saved)
-            self.assertEqual(saved["url"], "https://100.100.10.2:9000")
-            check.assert_called_once_with(saved)
-            self.assertEqual(prompt.call_count, 6)
+            self.assertNotIn(token, json.dumps(saved))
+            self.assertNotIn(token, output.getvalue())
+            self.assertIn("Connected", output.getvalue())
+            self.assertEqual(Path(saved["token_file"]).read_text().strip(), token)
+            self.assertEqual(Path(saved["token_file"]).stat().st_mode & 0o777, 0o600)
+
+    def test_setup_can_retry_a_denied_client_without_changing_saved_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "settings.json"
+            bearer = config.with_name("bearer")
+            bearer.write_text("t" * 40)
+            saved = {"url": "https://100.100.10.2:9000", "ca": "", "token_file": str(bearer), "microphone": "USB"}
+            config.write_text(json.dumps(saved))
+            output = io.StringIO()
+            response = requests.Response()
+            response.status_code = 403
+            error = requests.HTTPError("403", response=response)
+            with (
+                patch.object(desktop, "CONFIG", config),
+                patch.dict(os.environ, {"XDG_SESSION_TYPE": "wayland"}),
+                patch.object(desktop, "check_gateway", side_effect=[error, None]) as check,
+                patch("builtins.input", side_effect=["", "", "", "y", "", "", "", "n"]),
+                redirect_stdout(output),
+            ):
+                with self.assertRaisesRegex(SystemExit, "not saved"):
+                    desktop.setup()
+            self.assertIn("Add the desktop's private IP", output.getvalue())
+            self.assertEqual(check.call_count, 2)
+            self.assertEqual(json.loads(config.read_text()), saved)
+            self.assertEqual(bearer.read_text(), "t" * 40)
+
+    def test_empty_token_file_path_reports_error_instead_of_opening_working_directory(self):
+        with self.assertRaisesRegex(ValueError, "bearer token file"):
+            desktop.Client({"url": "https://100.100.10.2:9000", "token_file": ""})
 
     def test_local_command_sends_only_toggle_and_handles_stopped_client(self):
         with patch.object(desktop.socket, "socket") as create_socket:

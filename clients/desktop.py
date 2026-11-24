@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Ubuntu graphical client. Capture, network, and UI use independent threads."""
 import fcntl
+import getpass
 import io
 import json
 import os
@@ -13,11 +14,12 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 import wave
 
 import requests
 
-from provider import Client, atomic
+from provider import Client, atomic, gateway_url, read_bearer
 
 HOME=Path.home()/".local/state/innervoice-desktop"
 CONFIG=Path.home()/".config/innervoice-desktop/settings.json"
@@ -25,9 +27,9 @@ UNIT="innervoice-desktop.service"
 BLOCK=960000
 
 
-def check_gateway(cfg):
-    caps=Client(cfg).call("GET","/v1/capabilities",timeout=8)
-    if caps.get("api_version")!=1 or not caps.get("sessions") or caps.get("fragment_seconds")!=30:
+def check_gateway(cfg, bearer):
+    caps = Client(cfg, bearer=bearer).call("GET", "/v1/capabilities", timeout=8)
+    if not isinstance(caps, dict) or caps.get("api_version") != 1 or not caps.get("sessions") or caps.get("fragment_seconds") != 30:
         raise ValueError("Gateway needs the session API and 30-second fragment support")
 
 
@@ -35,26 +37,131 @@ def wayland_session():
     return os.environ.get("XDG_SESSION_TYPE") == "wayland" or os.environ.get("QT_QPA_PLATFORM") == "wayland"
 
 
+def ask(label, default=""):
+    suffix = f" [{default}]" if default != "" else ""
+    return input(f"  {label}{suffix}: ").strip() or default
+
+
+def choose_certificate(current):
+    print("  For the Gateway's self-signed certificate, use the public certificate copied from the server.")
+    print("  In Docker, put it at ~/.config/innervoice-desktop/ca.crt on the workstation before running setup.")
+    print("  Type 'system' to use the system trust store for a CA-issued certificate.")
+    while True:
+        value = ask("Public certificate file", current)
+        if value == "system":
+            return ""
+        if value:
+            path = Path(value).expanduser().resolve()
+            if path.is_file() and os.access(path, os.R_OK):
+                return str(path)
+        print("  Certificate file missing or unreadable. Copy it into the desktop configuration directory first.")
+
+
+def choose_bearer(current):
+    print("  Use the token registered on the server for this desktop.")
+    print("  Enter a token file path or type 'paste' to enter the token without displaying it.")
+    while True:
+        value = ask("Bearer token file or paste", current or "paste")
+        if value == "paste":
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", getpass.GetPassWarning)
+                    bearer = getpass.getpass("  Paste bearer token (hidden): ").strip()
+            except getpass.GetPassWarning:
+                print("  Open an interactive terminal or enter the path to a token file.")
+                continue
+            if len(bearer) >= 32 and bearer.isascii() and all(char.isprintable() and not char.isspace() for char in bearer):
+                return str(CONFIG.with_name("bearer")), bearer, True
+            print("  Enter one token of at least 32 characters.")
+        else:
+            path = Path(value).expanduser().resolve()
+            try:
+                return str(path), read_bearer(str(path)), False
+            except (ValueError, OSError) as error:
+                print(f"  {error}")
+
+
+def connection_error(error):
+    if isinstance(error, requests.exceptions.SSLError):
+        return "TLS verification failed. Check the trust certificate and use the exact server address it was issued for."
+    if isinstance(error, requests.HTTPError):
+        status = error.response.status_code
+        return {
+            401: "The Gateway rejected the token. Use the credential registered for this desktop.",
+            403: "The Gateway denied this source IP. Add the desktop's private IP to Allowed clients on the server.",
+            404: "The server did not expose the desktop session API. Check the Gateway HTTPS port.",
+        }.get(status, f"The Gateway returned HTTP {status}. Check its status on the server.")
+    if isinstance(error, requests.exceptions.Timeout):
+        return "The connection timed out. Check the desktop's private-network route, server port and firewall."
+    if isinstance(error, requests.exceptions.ConnectionError):
+        return "Could not connect. Check the Gateway is running and the desktop can reach its private HTTPS port."
+    if isinstance(error, requests.exceptions.JSONDecodeError):
+        return "The server did not return Gateway API data. Check the server address and port."
+    return str(error)
+
+
 def setup():
-    cfg=json.loads(CONFIG.read_bytes()) if CONFIG.exists() else {}
-    ca = CONFIG.with_name("ca.crt")
-    bearer = CONFIG.with_name("bearer")
-    for key, path in (("ca", ca), ("token_file", bearer)):
+    cfg = json.loads(CONFIG.read_bytes()) if CONFIG.exists() else {}
+    for key, filename in (("ca", "ca.crt"), ("token_file", "bearer")):
+        if key == "ca" and cfg.get(key) == "":
+            continue
+        path = CONFIG.with_name(filename)
         if not Path(cfg.get(key) or ".").is_file() and path.is_file():
             cfg[key] = str(path)
-    defaults = dict(url="", ca=str(ca) if ca.is_file() else "",
-                    token_file=str(bearer) if bearer.is_file() else "", source_ip="", source_port=0,
-                    microphone="")
-    if not wayland_session():
-        defaults["hotkey"] = "<ctrl>+<alt>+v"
-    for key, default in defaults.items():
-        value = input(f"{key} [{cfg.get(key, default)}]: ").strip()
-        cfg[key] = value or cfg.get(key, default)
-    check_gateway(cfg)
-    if cfg["ca"] and not Path(cfg["ca"]).is_file():
-        raise ValueError("Missing CA file")
-    CONFIG.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-    atomic(CONFIG,json.dumps(cfg).encode())
+    cfg.setdefault("source_ip", "")
+    cfg.setdefault("source_port", 0)
+    cfg.setdefault("microphone", "")
+    print("InnerVoice desktop setup")
+    print("Press Enter to keep a value in brackets. Ctrl+C cancels without saving.\n")
+
+    while True:
+        print("1/3  Gateway address")
+        while True:
+            try:
+                cfg["url"] = gateway_url(ask("HTTPS URL (for example https://SERVER-IP:9000)", cfg.get("url", "")))
+                break
+            except ValueError:
+                print("  Enter the Gateway's full HTTPS URL, without a path.")
+
+        print("\n2/3  Secure connection")
+        cfg["ca"] = choose_certificate((cfg["ca"] or "system") if "ca" in cfg else "")
+        print("  Server command to register a desktop token: ./bin/innervoice credential --identity desktop-hotkey")
+        cfg["token_file"], bearer, save_token = choose_bearer(cfg.get("token_file", ""))
+        if not wayland_session():
+            cfg["hotkey"] = ask("Recording shortcut", cfg.get("hotkey", "<ctrl>+<alt>+v"))
+        print("\n3/3  Verify and save")
+        print("  Checking the Gateway's TLS, credential and desktop session support…", flush=True)
+        try:
+            check_gateway(cfg, bearer)
+        except (requests.RequestException, ValueError, OSError) as error:
+            print(f"  {connection_error(error)}")
+            if ask("Edit connection settings and retry? (y/N)").lower() in ("y", "yes"):
+                # The pasted token only exists in memory until a successful save.
+                if save_token and not Path(cfg["token_file"]).is_file():
+                    cfg.pop("token_file")
+                continue
+            raise SystemExit("Setup cancelled. Settings were not saved.") from None
+        break
+
+    print(f"  Connected to {cfg['url']}")
+    if ask("Save desktop settings? (Y/n)", "y").lower() not in ("y", "yes"):
+        raise SystemExit("Setup cancelled. Settings were not saved.")
+    CONFIG.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if save_token:
+        token_path = Path(cfg["token_file"])
+        previous = token_path.read_bytes() if token_path.exists() else None
+        atomic(token_path, (bearer + "\n").encode())
+        try:
+            atomic(CONFIG, json.dumps(cfg).encode())
+        except (OSError, KeyboardInterrupt):
+            if previous is None:
+                token_path.unlink(missing_ok=True)
+            else:
+                atomic(token_path, previous)
+            raise
+    else:
+        atomic(CONFIG, json.dumps(cfg).encode())
+    print("Desktop settings saved. Start the client to test a recording.")
 
 
 def capture(directory,stop,events,device):
@@ -405,7 +512,12 @@ def main():
     os.umask(0o077)
     action = sys.argv[1] if len(sys.argv) > 1 else ""
     if action=="setup":
-        setup()
+        try:
+            setup()
+        except (KeyboardInterrupt, EOFError):
+            sys.exit("Setup cancelled.")
+        except (OSError, ValueError) as error:
+            sys.exit(f"Could not complete desktop setup: {error}")
     elif action=="start":
         if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
             sys.exit("Start in a graphical desktop session with microphone access.")
