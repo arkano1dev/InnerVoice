@@ -90,8 +90,10 @@ sudo apt install ffmpeg
 
 ### 1. Clone the Repository
 
+Set `INNERVOICE_REPOSITORY_URL` to the HTTPS clone URL shown by the repository host. For the private Voice Gateway and desktop client, follow the [operator runbook](docs/private-gateway.md).
+
 ```bash
-git clone https://github.com/arkano1dev/InnerVoice.git
+git clone "$INNERVOICE_REPOSITORY_URL" InnerVoice
 cd InnerVoice
 ```
 

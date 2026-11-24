@@ -268,11 +268,7 @@ async def start_handler(message: types.Message):
         "/lang - Change language / Cambiar idioma\n"
         "/help - Help / Ayuda\n"
         "/about - About / Acerca de\n\n"
-        "📫 Contact / Contacto: @arkano21\n"
-        "⚡ Support / Apoya:\n"
-        "- Bitcoin: `bc1qwktevffc57rkk8lwyd6yqwxrvcd4vjxggcpsrn`\n"
-        "- Lightning: `buffswan6@primal.net`\n"
-        "- Nostr: `npub1p2x3t3njq44vsk24qjkauzurvfd59c224qyu2mpgu9jverk9tfrqnz0ql5`",
+         "InnerVoice",
         parse_mode="Markdown"
     )
 
@@ -316,7 +312,7 @@ async def about_handler(message: types.Message):
             "� ¿Por qué Autogestionar?\n"
             "En el panorama actual de la IA, mantener el control de tus datos es crucial. "
             "Este bot demuestra cómo aprovechar herramientas potentes de IA mientras mantienes tu información privada.\n\n"
-            "📫 Contacto: @arkano21",
+             "InnerVoice",
             parse_mode="Markdown"
         )
     else:
@@ -333,7 +329,7 @@ async def about_handler(message: types.Message):
             "� Why Self-Host?\n"
             "In today's AI landscape, maintaining control of your data is crucial. "
             "This bot demonstrates how to leverage powerful AI tools while keeping your information private.\n\n"
-            "📫 Contact: @arkano21",
+             "InnerVoice",
             parse_mode="Markdown"
         )
 @dp.message(Command("lang"))
@@ -380,9 +376,6 @@ async def contribute_handler(message: types.Message):
         await message.answer(
             "💖 *Apoya el desarrollo de InnerVoice*\n\n"
             "Si encuentras útil este bot y quieres apoyar su mantenimiento y mejora, puedes contribuir con una donación:\n\n"
-            "🟠 *Bitcoin (on-chain)*: `bc1qwktevffc57rkk8lwyd6yqwxrvcd4vjxggcpsrn`\n"
-            "⚡ *Lightning Address*: `buffswan6@primal.net`\n"
-            "⚡ *Nostr*: `npub1p2x3t3njq44vsk24qjkauzurvfd59c224qyu2mpgu9jverk9tfrqnz0ql5`\n\n"
             "¡Gracias por tu apoyo! 🙌",
             parse_mode="Markdown"
         )
@@ -390,9 +383,6 @@ async def contribute_handler(message: types.Message):
         await message.answer(
             "💖 *Support InnerVoice Development*\n\n"
             "If you find this bot useful and want to help keep it running and improving, consider a small donation:\n\n"
-            "🟠 *Bitcoin (on-chain)*: `bc1qwktevffc57rkk8lwyd6yqwxrvcd4vjxggcpsrn`\n"
-            "⚡ *Lightning Address*: `buffswan6@primal.net`\n"
-            "⚡ *Nostr*: `npub1p2x3t3njq44vsk24qjkauzurvfd59c224qyu2mpgu9jverk9tfrqnz0ql5`\n\n"
             "Thanks for your support! 🙌",
             parse_mode="Markdown"
         )

@@ -516,14 +516,14 @@ Hello this is a test  ← Plain text, click to copy directly
 
 #### Option 1: Docker (Recommended)
 ```bash
-cd /home/as/InnerVoice
+cd InnerVoice
 docker-compose down
 docker-compose up -d --build
 ```
 
 #### Option 2: Direct Python
 ```bash
-cd /home/as/InnerVoice
+cd InnerVoice
 # Backup current version (already done: bot.py.backup, bot.py.bak)
 python bot.py
 ```
@@ -568,7 +568,6 @@ Ideas for next iteration:
 
 ### 🙏 Credits
 
-**Original Bot**: @arkano21
 **Enhanced Version**: Major UX overhaul for perfect copy-paste experience
 
 **Key Design Decisions**:
