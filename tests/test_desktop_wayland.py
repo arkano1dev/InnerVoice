@@ -27,7 +27,7 @@ class WaylandDesktopTests(unittest.TestCase):
         self.assertEqual(rules[0], "*")
         included = {rule[1:] for rule in rules if rule.startswith("!")}
         for line in (clients / "Dockerfile.desktop").read_text().splitlines():
-            if line.startswith("COPY "):
+            if line.startswith("COPY ") and "--from=" not in line:
                 for source in shlex.split(line)[1:-1]:
                     self.assertIn(source, included)
                     self.assertTrue((clients / source).is_file())

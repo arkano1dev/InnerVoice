@@ -1,14 +1,26 @@
-FROM alpine:3.24
-RUN apk upgrade --no-cache && apk add --no-cache ca-certificates python3 py3-qt5 qt5-qtwayland \
-      py3-cffi portaudio alsa-plugins-pulse && \
-    apk add --no-cache --virtual .installer py3-pip && \
-    python3 -m pip install --no-cache-dir --no-deps --target=/opt/innervoice/lib sounddevice && \
-    python3 -m pip install --no-cache-dir --target=/opt/innervoice/lib "requests>=2.34.2" "urllib3>=2.8.0" && \
-    apk del .installer && mkdir -p /opt/innervoice/bin && \
-    ln -s /usr/bin/python3 /opt/innervoice/bin/python && \
-    printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf
-ENV HOME=/home/innervoice PYTHONPATH=/opt/innervoice/lib PYTHONUNBUFFERED=1
+FROM cgr.dev/chainguard/wolfi-base AS runtime
+RUN apk add --no-cache ca-certificates python-3.13 portaudio libpulse libglvnd \
+    libxkbcommon wayland-libs-client wayland-libs-cursor wayland-libs-egl \
+    libfontconfig1 fontconfig-config glib libstdc++
+ENV PATH=/opt/innervoice/bin:$PATH IV_DESKTOP_QT=6 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
+
+FROM runtime AS build
+RUN apk add --no-cache py3.13-pip build-base pkgconf alsa-lib-dev pulseaudio-dev curl bzip2
+# Build the Pulse adapter only. PortAudio continues to use the default ALSA device.
+RUN curl -fsSL --retry 3 https://www.alsa-project.org/files/pub/plugins/alsa-plugins-1.2.12.tar.bz2 -o /tmp/plugins.tar.bz2 && \
+    echo 'b2064eb32662662f422f6e7c71f503d82c68d7a7059c8197bdd61ee08735b3ee104c6a5f9e3451e81124634514b91fc89d05d33041d9c2bb0f55b3c2ac3271b1  /tmp/plugins.tar.bz2' | sha512sum -c - && \
+    tar -xjf /tmp/plugins.tar.bz2 -C /tmp && cd /tmp/alsa-plugins-1.2.12 && \
+    ./configure --prefix=/usr && make -C pulse && mkdir /pulse && cp pulse/.libs/*_pulse.so /pulse/
+RUN python3.13 -m venv --without-pip /opt/innervoice && \
+    /usr/bin/python3.13 -m pip --python /opt/innervoice install --no-cache-dir --only-binary=:all: \
+        PySide6-Essentials requests sounddevice
+
+FROM runtime
+COPY --from=build /opt/innervoice /opt/innervoice
+COPY --from=build /pulse/ /usr/lib/alsa-lib/
+RUN printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf
+ENV HOME=/home/innervoice
 COPY desktop.py provider.py recording_storage.py ./
 USER 65534:65534
 ENTRYPOINT ["/opt/innervoice/bin/python", "/app/desktop.py"]

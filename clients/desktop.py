@@ -357,9 +357,14 @@ def run_graphical():
 
 
 def graphical(listener):
-    from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QSize
-    from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
-    from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
+    if os.environ.get('IV_DESKTOP_QT') == '6':
+        from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QSize
+        from PySide6.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
+        from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
+    else:
+        from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QSize
+        from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
+        from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
 
     cfg = json.loads(CONFIG.read_bytes())
     wayland = wayland_session()
@@ -833,7 +838,7 @@ def graphical(listener):
     notifier = None
     if isinstance(listener, socket.socket):
         notifier = QSocketNotifier(listener.fileno(), QSocketNotifier.Read)
-        notifier.activated.connect(lambda _: (read_shortcuts(listener, events), poll()))
+        notifier.activated.connect(lambda *_: (read_shortcuts(listener, events), poll()))
     else:
         timer.timeout.connect(lambda: read_shortcuts(listener, events))
     editor.document().documentLayout().documentSizeChanged.connect(lambda _: fit_text())

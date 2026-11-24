@@ -167,7 +167,7 @@ FIREWALL
   docker build -f clients/Dockerfile.desktop -t "$COMPOSE_PROJECT_NAME-desktop" clients
   docker run --rm --network none --read-only --cap-drop ALL --tmpfs /tmp \
     --env QT_QPA_PLATFORM=offscreen --entrypoint /opt/innervoice/bin/python "$COMPOSE_PROJECT_NAME-desktop" \
-    -c 'import os, sounddevice, requests; from PyQt5.QtWidgets import QApplication; app=QApplication([]); assert os.geteuid()>0'
+    -c 'import os, sounddevice, requests; from PySide6.QtWidgets import QApplication; app=QApplication([]); assert os.geteuid()>0'
   result=0
   for image in "$COMPOSE_PROJECT_NAME-gateway" "$COMPOSE_PROJECT_NAME-bot" "$COMPOSE_PROJECT_NAME-desktop"; do
     "$IV_TEST_SCANNER" "docker:$image" --fail-on high || result=1
