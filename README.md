@@ -20,6 +20,16 @@ The **Voice Gateway** accepts audio over private HTTPS, uses a shared Whisper wo
 
 The private Gateway and full-file agent integration are **Release A**. The desktop recorder and incremental session API are **Release B**. Deployment acceptance is pending. Release B also requires checks in a graphical Ubuntu session after Release A is accepted.
 
+## Everyday use
+
+| From | Action |
+| --- | --- |
+| Server | Run `./bin/innervoice config worker` to choose Whisper settings, then `./bin/innervoice restart` to apply them with the saved connection. |
+| Ubuntu workstation | Run `./bin/innervoice-desktop power` to turn dictation on or off. Press the configured shortcut to record, press again to finish, then paste the copied text wherever you need it. |
+| Agent host | Run `./bin/innervoice agent setup` once with its own jobs credential. Point the STT provider at the saved client settings. |
+
+See [daily commands and mesh access](docs/private-gateway.md#daily-operation-and-network-boundaries) for the panel indicator, credential scopes, port exposure and clipboard privacy.
+
 ## Documentation and source
 
 | Resource | What you'll find |

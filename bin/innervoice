@@ -70,6 +70,8 @@ def read(path):
 def validate(cfg):
     d=cfg["deployment"]
     private_address(d["bind"])
+    if type(d.get("listen_all", False)) is not bool:
+        raise ValueError("deployment.listen_all must be true or false")
     if not 1<=d["port"]<=65535 or d["engine"] not in ENGINES or d["version"]!=1:
         raise ValueError("Invalid deployment settings")
     client_networks(d["allowed_networks"])
@@ -95,7 +97,7 @@ def validate(cfg):
 
 def set_value(cfg,field,raw):
     section,key=field.rsplit(".",1)
-    old=DEFAULT[section][key]
+    old=False if field=="deployment.listen_all" else DEFAULT[section][key]
     if type(old) is bool and raw.lower() not in ("true","false"):
         raise ValueError("Boolean settings accept true or false")
     cfg[section][key]=raw.lower()=="true" if type(old) is bool else type(old)(raw)
@@ -189,23 +191,9 @@ def select_weights(value, engine):
     return str(path), weight_digest(path)
 
 
-def setup(cfg, engine=None):
-    if not shutil.which("docker"):
-        raise ValueError("Install Docker Engine and Compose, then run setup again.")
-    deployment = cfg["deployment"]
-    previous_endpoint = (deployment["bind"], deployment["port"])
-    engine = engine or deployment["engine"]
+def configure_worker(cfg, engine):
     profile = cfg[engine]
-    print("InnerVoice private Gateway setup")
-    print("Press Enter to keep a value in brackets. Ctrl+C cancels before saving.\n")
-    print("1/4  Private network")
-    print("  Use the server's IP on the network your voice client can reach.")
-    deployment["bind"] = prompt("Server IPv4 address (LAN, VLAN or virtual network)", deployment["bind"], private_address)
-    deployment["port"] = prompt("HTTPS port", str(deployment["port"]), listen_port)
-    print("  Enter the client IP, or multiple IPs or subnets separated by commas.")
-    deployment["allowed_networks"] = prompt("Allowed clients", deployment["allowed_networks"], client_networks)
-
-    print("\n2/4  Whisper worker")
+    print("\nWhisper worker")
     print(f"  Engine: {engine}. Reuse a local worker image and trusted model weights.")
     print("  List local images with 'docker image ls'.")
     default_image = profile["image"] or ("innervoice-whisper" if engine == "openai-whisper" else "")
@@ -225,7 +213,25 @@ def setup(cfg, engine=None):
         if input("  Trust this checkpoint? [y/N]: ").strip().lower() not in ("y", "yes"):
             raise SystemExit("Setup cancelled. Settings were not saved.")
     profile.update(image=image, image_id=image_id, model=model, weights=weights, digest=digest)
-    deployment["engine"] = engine
+    cfg["deployment"]["engine"] = engine
+
+
+def setup(cfg, engine=None):
+    if not shutil.which("docker"):
+        raise ValueError("Install Docker Engine and Compose, then run setup again.")
+    deployment = cfg["deployment"]
+    previous_endpoint = (deployment["bind"], deployment["port"])
+    engine = engine or deployment["engine"]
+    print("InnerVoice private Gateway setup")
+    print("Press Enter to keep a value in brackets. Ctrl+C cancels before saving.\n")
+    print("1/4  Private network")
+    print("  Use the server's IP on the network your voice client can reach.")
+    deployment["bind"] = prompt("Server IPv4 address (LAN, VLAN or virtual network)", deployment["bind"], private_address)
+    deployment["port"] = prompt("HTTPS port", str(deployment["port"]), listen_port)
+    print("  Enter the client IP, or multiple IPs or subnets separated by commas.")
+    deployment["allowed_networks"] = prompt("Allowed clients", deployment["allowed_networks"], client_networks)
+
+    configure_worker(cfg, engine)
     validate(cfg)
 
     print("\n3/4  HTTPS and client access")
@@ -325,7 +331,7 @@ def env(cfg):
     d=cfg["deployment"]
     p=cfg[d["engine"]]
     options={f"IV_{k.upper()}":str(v) for group in ("limits","retention","validation") for k,v in cfg[group].items()}
-    return dict(os.environ,**options,IV_FP16=str(p["fp16"]).lower(),IV_BEAM=str(p["beam"]),
+    return dict(os.environ,**options,IV_PUBLISH="0.0.0.0" if d.get("listen_all",False) else d["bind"],IV_FP16=str(p["fp16"]).lower(),IV_BEAM=str(p["beam"]),
                 IV_PREVIOUS=str(p["previous_text"]).lower(),IV_COMPILE=str(p["compile"]).lower(),IV_IDLE=str(p["idle_seconds"]),
                 IV_ENGINE=d["engine"],IV_UID=str(os.getuid()),IV_GID=str(os.getgid()),
                 IV_BIND=d["bind"],IV_ALLOWED_NETWORKS=d["allowed_networks"],IV_PORT=str(d["port"]),IV_ENABLE=str(int(d["enable"])),
@@ -372,13 +378,21 @@ def check_clients(path):
     if not path.is_file():
         raise ValueError("Client credentials are missing. Run ./bin/innervoice config setup.")
     clients = json.loads(path.read_bytes())
-    if not isinstance(clients, dict) or not clients or not all(
-        re.fullmatch(r"[a-z0-9-]{1,48}", label)
-        and isinstance(digest, str)
-        and re.fullmatch(r"[0-9a-f]{64}", digest)
-        for label, digest in clients.items()
-    ) or len(set(clients.values())) != len(clients):
+    if not isinstance(clients, dict) or not clients:
         raise ValueError("Invalid credential map")
+    seen = set()
+    for label, entry in clients.items():
+        digest = entry.get("digest") if isinstance(entry, dict) else entry
+        if not (re.fullmatch(r"[a-z0-9-]{1,48}", label) and isinstance(digest, str)
+                and re.fullmatch(r"[0-9a-f]{64}", digest) and digest not in seen):
+            raise ValueError("Invalid credential map")
+        seen.add(digest)
+        if isinstance(entry, dict):
+            if entry.get("scope") not in ("jobs", "sessions", "both"):
+                raise ValueError("Invalid client scope")
+            if entry.get("peer"):
+                private_address(entry["peer"])
+
 
 
 def preflight(cfg):
@@ -435,7 +449,12 @@ def operate(args):
     if not FILE.exists():
         raise ValueError("Run innervoice start --setup first")
     if args.cmd=="config":
-        if args.action=="set":
+        if args.action=="worker":
+            configure_worker(cfg, args.engine or cfg["deployment"]["engine"])
+            validate(cfg)
+            save_config(cfg)
+            print("Worker profile saved. Apply with ./bin/innervoice restart.")
+        elif args.action=="set":
             for pair in args.values:
                 field,raw=pair.split("=",1)
                 if field=="deployment.engine":
@@ -477,13 +496,21 @@ def operate(args):
         clients=json.loads(path.read_bytes()) if path.exists() else {}
         if not re.fullmatch(r"[a-z0-9-]{1,48}",args.identity or ""):
             raise ValueError("Use a short lowercase integration label")
-        secret=getpass.getpass("Client bearer token (at least 32 characters): ")
-        if len(secret)<32:
-            raise ValueError("Token too short")
-        digest=hashlib.sha256(secret.encode()).hexdigest()
-        if any(v==digest and k!=args.identity for k,v in clients.items()):
+        previous = clients.get(args.identity)
+        policy = previous if isinstance(previous, dict) else {}
+        peer = private_address(args.peer) if args.peer else policy.get("peer", "")
+        scope = args.scope or policy.get("scope", "both")
+        message = "Client bearer token (Enter keeps the registered token): " if previous else "New client bearer token (32+ characters): "
+        secret = getpass.getpass(message)
+        if previous and not secret:
+            digest = previous["digest"] if isinstance(previous, dict) else previous
+        else:
+            if len(secret)<32 or not secret.isascii() or any(c.isspace() or not c.isprintable() for c in secret):
+                raise ValueError("Use a printable token of at least 32 characters without spaces")
+            digest=hashlib.sha256(secret.encode()).hexdigest()
+        if any((v.get("digest") if isinstance(v, dict) else v) == digest and k != args.identity for k,v in clients.items()):
             raise ValueError("Each integration requires its own token")
-        clients[args.identity]=digest
+        clients[args.identity]={"digest":digest, "scope":scope, "peer":peer}
         atomic(path,json.dumps(clients).encode())
         return
     if args.engine:
@@ -543,16 +570,40 @@ def main():
     if sys.argv[1:2]==["desktop"]:
         script=str(REPO/"clients/desktop.py")
         os.execv(sys.executable,[sys.executable,script,*sys.argv[2:]])
-    parser=argparse.ArgumentParser()
+    if sys.argv[1:3] == ["agent", "setup"]:
+        script = str(REPO/"clients/desktop.py")
+        os.execv(sys.executable, [sys.executable, script, "agent-setup"])
+    parser=argparse.ArgumentParser(description="Operate the private InnerVoice Gateway.",
+        formatter_class=argparse.RawDescriptionHelpFormatter, epilog="""First use
+  start --setup          Configure the endpoint, worker and TLS, then start.
+
+Daily operation
+  status                 Show running services and unapplied settings.
+  config worker          Choose a model, image and verified local weights.
+  config set KEY=VALUE   Save decoder, network or admission settings.
+  config show            Display the saved profile with private paths masked.
+  config validate        Check saved settings.
+  config edit            Edit advanced settings interactively.
+  config setup           Revisit the full wizard.
+  restart                Drain jobs and apply the saved profile.
+  credential --identity  Register or rotate a dedicated integration token.
+  dashboard --watch      Watch recent jobs and performance.
+  stop                   Drain jobs and stop services.
+  desktop                Manage a native desktop client (setup/start/stop/status/check).
+  agent setup            Save a local connection for the command STT provider.""")
     parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential"])
     parser.add_argument("action",nargs="?")
     parser.add_argument("values",nargs="*")
     parser.add_argument("--setup",action="store_true",help="walk through private Gateway setup before starting")
-    parser.add_argument("--engine",choices=ENGINES)
-    parser.add_argument("--job")
-    parser.add_argument("--watch",action="store_true")
-    parser.add_argument("--identity")
+    parser.add_argument("--engine",choices=ENGINES,help="select a saved engine profile, or configure it with config worker")
+    parser.add_argument("--job",help="filter dashboard by job ID")
+    parser.add_argument("--watch",action="store_true",help="refresh the dashboard every two seconds")
+    parser.add_argument("--scope", choices=("jobs","sessions","both"), help="limit this credential to agent jobs or desktop sessions")
+    parser.add_argument("--peer",help="restrict this token to one observed private source IPv4")
+    parser.add_argument("--identity",help="unique lowercase name for this client")
     args=parser.parse_args()
+    if args.cmd == "config" and args.action not in ("setup", "worker", "show", "set", "validate", "edit"):
+        parser.error("Choose config setup, worker, show, set, validate or edit.")
     if args.setup and args.cmd != "start":
         parser.error("--setup is available with start. Use 'config setup' to configure without starting.")
     os.umask(0o077)

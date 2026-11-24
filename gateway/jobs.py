@@ -24,6 +24,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.formparser import FormDataParser
 from lingua import Language, LanguageDetectorBuilder
 
+from access import authorize
 import legacy
 
 api = Flask(__name__)
@@ -101,11 +102,11 @@ def authenticate():
         return failure("unauthorized", 401)
     with open("/run/innervoice/clients.json") as stream:
         clients = json.load(stream)
-    for owner, digest in clients.items():
-        if hmac.compare_digest(hashlib.sha256(secret.encode()).hexdigest(), digest):
-            request.environ["innervoice.owner"] = owner
-            return
-    return failure("unauthorized", 401)
+    owner, scope, error = authorize(clients, secret, request.remote_addr, request.path)
+    if error:
+        return failure(error, 401 if error == "unauthorized" else 403)
+    request.environ["innervoice.scope"] = scope
+    request.environ["innervoice.owner"] = owner
 
 
 @api.after_request
@@ -291,7 +292,8 @@ def status(ident):
 
 @api.get("/v1/capabilities")
 def capabilities():
-    return dict(api_version=1,jobs=True,sessions=True,fragment_seconds=30,output_language="en")
+    scope = request.environ["innervoice.scope"]
+    return dict(api_version=1,jobs=scope in ("both","jobs"),sessions=scope in ("both","sessions"),fragment_seconds=30,output_language="en")
 
 
 def finish_error(db, ident, reason):

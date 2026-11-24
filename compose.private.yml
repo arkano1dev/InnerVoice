@@ -8,7 +8,7 @@ services:
     security_opt: [no-new-privileges:true]
     user: "${IV_UID:?}:${IV_GID:?}"
     ports:
-      - "${IV_BIND:?}:${IV_PORT:?}:9443"
+      - "${IV_PUBLISH:?}:${IV_PORT:?}:9443"
     environment:
       PRIVATE_API: "1"
       IV_ALLOWED_NETWORKS: "${IV_ALLOWED_NETWORKS:?}"

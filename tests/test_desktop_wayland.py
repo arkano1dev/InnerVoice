@@ -31,7 +31,7 @@ class WaylandDesktopTests(unittest.TestCase):
 
             def request(session, method, url, **options):
                 self.assertEqual(method, "GET")
-                self.assertEqual(url, "https://100.100.10.2:9000/v1/capabilities")
+                self.assertEqual(url, "https://gateway.example.invalid:9000/v1/capabilities")
                 self.assertEqual(session.headers["Authorization"], "Bearer " + token)
                 self.assertEqual(session.verify, str(certificate))
                 self.assertFalse(session.trust_env)
@@ -45,7 +45,7 @@ class WaylandDesktopTests(unittest.TestCase):
                 patch.object(desktop, "CONFIG", config),
                 patch.dict(os.environ, {"XDG_SESSION_TYPE": "wayland"}),
                 patch.object(requests.Session, "request", autospec=True, side_effect=request),
-                patch("builtins.input", side_effect=["", "https://100.100.10.2:9000", "", "", "", ""]),
+                patch("builtins.input", side_effect=["", "https://gateway.example.invalid:9000", "", "", "", ""]),
                 patch.object(desktop.getpass, "getpass", side_effect=["", token]),
                 redirect_stdout(output),
             ):
@@ -63,7 +63,7 @@ class WaylandDesktopTests(unittest.TestCase):
             config = Path(directory) / "settings.json"
             bearer = config.with_name("bearer")
             bearer.write_text("t" * 40)
-            saved = {"url": "https://100.100.10.2:9000", "ca": "", "token_file": str(bearer), "microphone": "USB"}
+            saved = {"url": "https://gateway.example.invalid:9000", "ca": "", "token_file": str(bearer), "microphone": "USB"}
             config.write_text(json.dumps(saved))
             output = io.StringIO()
             response = requests.Response()
@@ -83,9 +83,29 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertEqual(json.loads(config.read_text()), saved)
             self.assertEqual(bearer.read_text(), "t" * 40)
 
+    def test_agent_reuses_saved_credential_without_reentry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory)/"settings.json"
+            bearer = config.with_name("bearer")
+            bearer.write_text("a" * 40)
+            config.write_text(json.dumps({"url":"https://gateway.example.invalid", "ca":"", "token_file":str(bearer)}))
+            with (
+                patch.object(desktop, "CONFIG", config),
+                patch.object(desktop.Client, "call", return_value={"api_version":1, "jobs":True, "sessions":False}),
+                patch.object(desktop.getpass, "getpass", side_effect=AssertionError("unexpected credential prompt")),
+                patch("builtins.input", return_value=""),
+                redirect_stdout(io.StringIO()),
+            ):
+                desktop.setup(agent=True)
+            saved = json.loads(config.read_text())
+            self.assertEqual(saved["role"], "agent")
+            self.assertEqual(Path(saved["token_file"]).read_text(), "a" * 40)
+            self.assertNotIn("a" * 40, config.read_text())
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
     def test_empty_token_file_path_reports_error_instead_of_opening_working_directory(self):
         with self.assertRaisesRegex(ValueError, "bearer token file"):
-            desktop.Client({"url": "https://100.100.10.2:9000", "token_file": ""})
+            desktop.Client({"url": "https://gateway.example.invalid:9000", "token_file": ""})
 
     def test_local_command_sends_only_toggle_and_handles_stopped_client(self):
         with patch.object(desktop.socket, "socket") as create_socket:
@@ -151,8 +171,13 @@ class WaylandDesktopTests(unittest.TestCase):
                 stop.wait(2)
                 events.put(("stopped", None))
 
-            def network(_, __, ___, events, finished):
+            attempts = []
+            def network(_, directory, ___, events, finished):
+                attempts.append(directory)
                 if finished.wait(2):
+                    if len(attempts) == 1:
+                        events.put(("retry", ("Synthetic gateway failure", True)))
+                        return
                     events.put(("segments", [{"index": 0, "text": "Test note"}]))
                     events.put(("ready", "Ready"))
 
@@ -169,9 +194,17 @@ class WaylandDesktopTests(unittest.TestCase):
             def inspect_editor():
                 for widget in app.topLevelWidgets():
                     editor = widget.findChild(QtWidgets.QTextEdit)
+                    if editor is not None and not observed.get("retried"):
+                        labels = [label.text() for label in widget.findChildren(QtWidgets.QLabel)]
+                        if "Synthetic gateway failure" in labels:
+                            observed["retried"] = True
+                            button = next(b for b in widget.findChildren(QtWidgets.QPushButton) if b.text() == "Record")
+                            button.click()
+                            button.click()
                     if editor is None or editor.toPlainText() != "Test note":
                         continue
                     copy = next(button for button in widget.findChildren(QtWidgets.QPushButton) if button.text() == "Copy")
+                    observed["auto"] = app.clipboard().text()
                     copy.click()
                     observed["clipboard"] = app.clipboard().text()
                     app.quit()
@@ -182,7 +215,7 @@ class WaylandDesktopTests(unittest.TestCase):
             with patch.dict(os.environ, env):
                 app = QtWidgets.QApplication([])
                 QtCore.QTimer.singleShot(30, inspect_editor)
-                QtCore.QTimer.singleShot(3000, app.quit)
+                QtCore.QTimer.singleShot(7000, app.quit)
                 with (
                     patch.object(QtWidgets, "QApplication", return_value=app),
                     patch.object(desktop, "HOME", home),
@@ -191,6 +224,9 @@ class WaylandDesktopTests(unittest.TestCase):
                     patch.object(desktop, "network", side_effect=network),
                 ):
                     desktop.graphical(listener)
+            self.assertTrue(observed.get("retried"))
+            self.assertEqual(len(set(attempts)), 2)
+            self.assertEqual(observed.get("auto"), "Test note")
             self.assertEqual(observed.get("clipboard"), "Test note")
             record = json.loads((home / (home / "current").read_text() / "editor.json").read_text())
             self.assertEqual(record["text"], "Test note")

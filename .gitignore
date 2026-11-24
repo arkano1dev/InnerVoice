@@ -32,3 +32,9 @@ state/
 *.pt
 *.safetensors
 *.log
+
+bearer
+client.toml
+network-mode
+editor.json
+control.sock

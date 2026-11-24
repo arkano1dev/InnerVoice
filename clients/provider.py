@@ -80,7 +80,7 @@ class Client:
 
 def run(args):
     with open(args.config,"rb") as stream:
-        cfg=tomllib.load(stream)["client"]
+        cfg = json.load(stream) if Path(args.config).suffix == ".json" else tomllib.load(stream)["client"]
     client=Client(cfg)
     root=Path(cfg["state_dir"])
     root.mkdir(mode=0o700,parents=True,exist_ok=True)

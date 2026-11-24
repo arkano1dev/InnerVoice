@@ -7,6 +7,9 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     init: true
+    mem_limit: 384m
+    cpus: 1.0
+    pids_limit: 96
     environment:
       XDG_SESSION_TYPE: wayland
       XDG_RUNTIME_DIR: /run/innervoice-runtime

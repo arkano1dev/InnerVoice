@@ -1,10 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-action=${1:-}
+action=${1:-help}
+if [[ "$action" == help || "$action" == --help || "$action" == -h ]]; then
+    cat <<'HELP'
+InnerVoice desktop
+
+  setup       Verify the gateway and save this workstation's settings.
+  start       Start with the saved settings.
+  power       Switch this client on or off. The gateway stays online.
+  toggle      Start or finish a recording in the running client.
+  show        Open the editor without starting the microphone.
+  shortcut    Print the command for your global keyboard shortcut.
+  check       Test TLS and authentication from the running container.
+  status      Show the container state.
+  logs        Follow recent client diagnostics.
+  stop        Turn off the recorder and indicator.
+HELP
+    exit
+fi
 case "$action" in
-    setup|start|toggle|shortcut|status|logs|stop) ;;
-    *) echo "Usage: $0 setup|start|toggle|shortcut|status|logs|stop" >&2; exit 2 ;;
+    setup|start|power|toggle|show|shortcut|check|status|logs|stop) ;;
+    *) echo "Usage: $0 setup|start|power|toggle|show|shortcut|check|status|logs|stop" >&2; exit 2 ;;
 esac
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ "$action" == shortcut ]]; then
@@ -24,8 +41,17 @@ export IV_DESKTOP_CONFIG=$HOME/.config/innervoice-desktop
 export IV_DESKTOP_STATE=$HOME/.local/state/innervoice-desktop
 
 compose=(docker compose --env-file /dev/null -p innervoice-desktop -f "$repo_dir/compose.desktop.yml")
-if [[ "${INNERVOICE_DESKTOP_HOST_NETWORK:-0}" == 1 ]]; then
+mode=${INNERVOICE_DESKTOP_HOST_NETWORK:-}
+if [[ -z "$mode" && -f "$IV_DESKTOP_CONFIG/network-mode" ]]; then
+    read -r mode < "$IV_DESKTOP_CONFIG/network-mode"
+fi
+case "${mode:=0}" in 0|1) ;; *) echo "Network mode must be 0 (bridge) or 1 (host)." >&2; exit 2 ;; esac
+if [[ "$mode" == 1 ]]; then
     compose+=(-f "$repo_dir/compose.desktop.host-network.yml")
+fi
+if [[ "$action" == power ]]; then
+    running=$("${compose[@]}" ps --status running -q desktop)
+    if [[ -n "$running" ]]; then action=stop; else action=start; fi
 fi
 if [[ "$action" == setup || "$action" == start ]]; then
     if [[ "${XDG_SESSION_TYPE:-}" != wayland || ! -S "$IV_DESKTOP_WAYLAND_SOCKET" ]]; then
@@ -38,18 +64,33 @@ if [[ "$action" == setup || "$action" == start ]]; then
     fi
     install -d -m 700 "$IV_DESKTOP_CONFIG" "$IV_DESKTOP_STATE"
     if [[ "$action" == setup ]]; then
-        exec "${compose[@]}" run --rm --build desktop setup
+        "${compose[@]}" run --rm --build desktop setup
+        umask 077
+        temp_mode=$(mktemp "$IV_DESKTOP_CONFIG/.network-mode.XXXXXX")
+        printf '%s\n' "$mode" > "$temp_mode"
+        mv "$temp_mode" "$IV_DESKTOP_CONFIG/network-mode"
+        exit
     fi
     if [[ ! -f "$IV_DESKTOP_CONFIG/settings.json" ]]; then
         echo "Run $0 setup before starting the desktop client." >&2
         exit 1
     fi
-    exec "${compose[@]}" up -d --build desktop
+    "${compose[@]}" up -d --build desktop
+    if /usr/bin/python3 -c 'from PyQt5.QtWidgets import QSystemTrayIcon' 2>/dev/null; then
+        if ! systemctl --user is-active --quiet innervoice-indicator.service; then
+            systemd-run --user --collect --unit=innervoice-indicator --setenv=WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" /usr/bin/python3 "$repo_dir/clients/tray.py" || echo "Panel indicator unavailable. The recorder overlay remains accessible."
+        fi
+    else
+        echo "For the panel indicator install python3-pyqt5 and enable your desktop's AppIndicator tray."
+    fi
+    exit
 fi
 
 case "$action" in
-    toggle) exec "${compose[@]}" exec -T desktop /opt/innervoice/bin/python /app/desktop.py toggle ;;
+    toggle|show) exec "${compose[@]}" exec -T desktop /opt/innervoice/bin/python /app/desktop.py "$action" ;;
+    check) exec "${compose[@]}" exec -T desktop /opt/innervoice/bin/python /app/desktop.py check ;;
     status) exec "${compose[@]}" ps -a desktop ;;
     logs) exec "${compose[@]}" logs -f --tail=80 desktop ;;
-    stop) exec "${compose[@]}" stop desktop ;;
+    stop) systemctl --user stop innervoice-indicator.service 2>/dev/null || true
+          exec "${compose[@]}" stop desktop ;;
 esac

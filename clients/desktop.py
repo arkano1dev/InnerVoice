@@ -29,6 +29,10 @@ BLOCK=960000
 
 def check_gateway(cfg, bearer):
     caps = Client(cfg, bearer=bearer).call("GET", "/v1/capabilities", timeout=8)
+    if cfg.get("role") == "agent":
+        if not isinstance(caps, dict) or caps.get("api_version") != 1 or not caps.get("jobs"):
+            raise ValueError("This agent credential requires the jobs API.")
+        return
     if not isinstance(caps, dict) or caps.get("api_version") != 1 or not caps.get("sessions") or caps.get("fragment_seconds") != 30:
         raise ValueError("Gateway needs the session API and 30-second fragment support")
 
@@ -44,7 +48,7 @@ def ask(label, default=""):
 
 def choose_certificate(current):
     print("  For the Gateway's self-signed certificate, use the public certificate copied from the server.")
-    print("  In Docker, put it at ~/.config/innervoice-desktop/ca.crt on the workstation before running setup.")
+    print(f"  Suggested local certificate: {CONFIG.with_name('ca.crt')}")
     print("  Type 'system' to use the system trust store for a CA-issued certificate.")
     while True:
         value = ask("Public certificate file", current)
@@ -100,7 +104,7 @@ def connection_error(error):
     return str(error)
 
 
-def setup():
+def setup(agent=False):
     cfg = json.loads(CONFIG.read_bytes()) if CONFIG.exists() else {}
     for key, filename in (("ca", "ca.crt"), ("token_file", "bearer")):
         if key == "ca" and cfg.get(key) == "":
@@ -108,10 +112,12 @@ def setup():
         path = CONFIG.with_name(filename)
         if not Path(cfg.get(key) or ".").is_file() and path.is_file():
             cfg[key] = str(path)
+    if agent:
+        cfg["role"] = "agent"
     cfg.setdefault("source_ip", "")
     cfg.setdefault("source_port", 0)
     cfg.setdefault("microphone", "")
-    print("InnerVoice desktop setup")
+    print("InnerVoice agent setup" if agent else "InnerVoice desktop setup")
     print("Press Enter to keep a value in brackets. Ctrl+C cancels without saving.\n")
 
     while True:
@@ -125,10 +131,11 @@ def setup():
 
         print("\n2/3  Secure connection")
         cfg["ca"] = choose_certificate((cfg["ca"] or "system") if "ca" in cfg else "")
-        print("  Server command to register a desktop token: ./bin/innervoice credential --identity desktop-hotkey")
+        identity = "telegram-agent" if agent else "desktop-hotkey"
+        print(f"  Register this identity once on the server: ./bin/innervoice credential --identity {identity} --scope {'jobs' if agent else 'sessions'}")
         cfg["token_file"], bearer, save_token = choose_bearer(cfg.get("token_file", ""))
-        if not wayland_session():
-            cfg["hotkey"] = ask("Recording shortcut", cfg.get("hotkey", "<ctrl>+<alt>+v"))
+        if not agent and not wayland_session():
+            cfg["hotkey"] = ask("Recording shortcut", cfg.get("hotkey", "<cmd>+<shift>+<f8>"))
         print("\n3/3  Verify and save")
         print("  Checking the Gateway's TLS, credential and desktop session support…", flush=True)
         try:
@@ -144,9 +151,14 @@ def setup():
         break
 
     print(f"  Connected to {cfg['url']}")
-    if ask("Save desktop settings? (Y/n)", "y").lower() not in ("y", "yes"):
+    if ask("Save local settings? (Y/n)", "y").lower() not in ("y", "yes"):
         raise SystemExit("Setup cancelled. Settings were not saved.")
     CONFIG.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if Path(cfg["token_file"]) != CONFIG.with_name("bearer"):
+        cfg["token_file"] = str(CONFIG.with_name("bearer"))
+        save_token = True
+    if agent:
+        cfg.setdefault("state_dir", str(CONFIG.parent/"state"))
     if save_token:
         token_path = Path(cfg["token_file"])
         previous = token_path.read_bytes() if token_path.exists() else None
@@ -161,12 +173,16 @@ def setup():
             raise
     else:
         atomic(CONFIG, json.dumps(cfg).encode())
+    if agent:
+        print(f"Agent settings saved. Use clients/provider.py --config {CONFIG} INPUT OUTPUT.")
+        return
     print("Desktop settings saved. Start the client to test a recording.")
 
 
 def capture(directory,stop,events,device):
-    import sounddevice as sd
     try:
+        import sounddevice as sd
+        from array import array
         with sd.RawInputStream(samplerate=16000,channels=1,dtype="int16",device=device or None) as mic:
             for index in range(120):
                 path=directory/f"{index:03d}.raw"
@@ -175,6 +191,8 @@ def capture(directory,stop,events,device):
                         audio,overflow=mic.read(min(4000,(BLOCK-out.tell())//2))
                         if overflow:
                             raise ValueError("Capture overflow")
+                        samples = array("h", bytes(audio))
+                        events.put(("level", min(100, max(map(abs, samples), default=0) * 100 // 16000)))
                         out.write(bytes(audio))
                         out.flush()
                         os.fsync(out.fileno())
@@ -195,6 +213,7 @@ def network(cfg, directory, key, events, finished):
         return
 
     path = None
+    failures = 0
     while True:
         try:
             done = finished.is_set()
@@ -231,10 +250,12 @@ def network(cfg, directory, key, events, finished):
                                 headers={"Content-Type": "audio/wav"})
             if done and ready and not progress["closed"]:
                 client.call("POST", path + "/finalize", json={"last_index": int(ready[-1].stem)})
+            failures = 0
             time.sleep(1)
         except requests.HTTPError as error:
             status = error.response.status_code
-            if status in (429, 502, 503, 504):
+            if status in (429, 502, 503, 504) and failures < 2:
+                failures += 1
                 events.put(("notice", "Gateway busy or unavailable. Retrying saved fragments."))
                 time.sleep(3)
                 continue
@@ -245,6 +266,10 @@ def network(cfg, directory, key, events, finished):
             events.put(("retry", ("Check the Gateway endpoint, TLS trust and configuration.", False)))
             return
         except (requests.Timeout, requests.ConnectionError):
+            failures += 1
+            if failures >= 3:
+                events.put(("retry", ("Gateway offline. Retry this audio or record another.", False)))
+                return
             events.put(("notice", "Connection interrupted. Retrying saved fragments."))
             time.sleep(3)
         except (requests.RequestException, OSError):
@@ -252,23 +277,10 @@ def network(cfg, directory, key, events, finished):
             return
 
 
-def focused():
-    # Keep a process-local AT-SPI object identity. Never synthesize keystrokes.
-    try:
-        import pyatspi
-        match=pyatspi.findDescendant(pyatspi.Registry.getDesktop(0),
-              lambda obj: obj.getState().contains(pyatspi.STATE_FOCUSED) and obj.getState().contains(pyatspi.STATE_EDITABLE))
-        if match:
-            return match
-    except Exception:
-        pass
-    return None
-
-
-def send_toggle():
+def send_toggle(message=b"toggle"):
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
-            client.sendto(b"toggle", str(HOME/"control.sock"))
+            client.sendto(message, str(HOME/"control.sock"))
     except OSError:
         sys.exit("The desktop client is not ready. Start it and check its status.")
 
@@ -279,6 +291,8 @@ def read_shortcuts(listener, events):
             message = listener.recv(64)
         except BlockingIOError:
             return
+        if message == b"show":
+            events.put(("show", None))
         if message == b"toggle":
             events.put(("toggle", None))
 
@@ -302,9 +316,9 @@ def run_graphical():
 
 
 def graphical(listener):
-    from PyQt5.QtCore import QSignalBlocker, QTimer
-    from PyQt5.QtGui import QTextCursor
-    from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget
+    from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier
+    from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter
+    from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
 
     cfg = json.loads(CONFIG.read_bytes())
     wayland = wayland_session()
@@ -322,20 +336,78 @@ def graphical(listener):
             if not any(old.iterdir()):
                 old.rmdir()
     app = QApplication([])
-    root = QWidget()
+    app.setQuitOnLastWindowClosed(False)
+    class Overlay(QWidget):
+        def closeEvent(self, event):
+            event.ignore()
+            self.hide()
+
+    root = Overlay(None, Qt.Tool | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
     root.setWindowTitle("InnerVoice")
-    root.resize(620, 280)
+    root.setWindowOpacity(.96)
+    root.resize(440, 220)
+    root.setStyleSheet("""
+        QWidget {background:#15161a;color:#ededf0;font:14px sans-serif}
+        QTextEdit {background:#202127;border:1px solid #41424b;border-radius:8px;padding:8px}
+        QPushButton {background:#303139;border:0;border-radius:7px;padding:6px 12px}
+        QPushButton:hover {background:#484951} QPushButton:disabled {color:#888}
+        QProgressBar {background:#292a31;border:0;border-radius:3px}
+        QProgressBar::chunk {background:#ff556e;border-radius:3px}
+    """)
     layout = QVBoxLayout(root)
+    layout.setContentsMargins(16, 12, 16, 12)
+    header = QHBoxLayout()
     status = QLabel("Ready to record")
+    status.setWordWrap(True)
+    header.addWidget(status, 1)
+    elapsed = QLabel()
+    header.addWidget(elapsed)
+    layout.addLayout(header)
+    meter = QProgressBar()
+    meter.setTextVisible(False)
+    meter.setFixedHeight(5)
+    layout.addWidget(meter)
     editor = QTextEdit()
-    layout.addWidget(status)
+    editor.setAcceptRichText(False)
+    editor.setPlaceholderText("Your transcript appears here")
     layout.addWidget(editor)
     buttons = QHBoxLayout()
     layout.addLayout(buttons)
+    tray = QSystemTrayIcon(app)
+    menu = QMenu()
+    tray.setContextMenu(menu)
+    def reveal():
+        screen = app.primaryScreen()
+        if screen:
+            root.move(screen.availableGeometry().center() - root.rect().center())
+        root.show()
+        root.raise_()
+        root.activateWindow()
+
+    def indicator(phase):
+        pix = QPixmap(32, 32)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor({"Recording":"#ff354e", "Processing":"#efbe67"}.get(phase, "#75d9cf")))
+        painter.drawEllipse(4, 4, 24, 24)
+        painter.end()
+        icon = QIcon(pix)
+        tray.setIcon(icon)
+        root.setWindowIcon(icon)
+        tray.setToolTip("InnerVoice · " + phase)
+        atomic(HOME/"indicator", phase.encode())
+
+    indicator("Ready")
+    tray.show()
+    started = 0.
+    hide_timer = QTimer(root)
+    hide_timer.setSingleShot(True)
+    hide_timer.timeout.connect(root.hide)
     events=queue.Queue()
     directory=None
     state={}
-    target=None
     stop=threading.Event()
     finished=threading.Event()
     working=False
@@ -348,6 +420,7 @@ def graphical(listener):
             atomic(directory/"editor.json",json.dumps(state).encode())
 
     editor.textChanged.connect(save)
+    editor.textChanged.connect(hide_timer.stop)
 
     def transfer():
         nonlocal transfer_active
@@ -362,41 +435,31 @@ def graphical(listener):
             return
         if replace_session:
             state["session_key"] = secrets.token_hex(16)
-            save()
             replace_session = False
+            state["replace_session"] = False
+            save()
+        indicator("Processing")
         status.setText("Syncing saved audio")
         transfer()
 
-    def insert():
-        if not directory or not state.get("ready") or state.get("intent") or target is None:
-            return
-        try:
-            if focused()!=target:
-                status.setText("Focus changed. Copy text from the editor.")
-                return
-            text=editor.toPlainText()
-            pos=target.queryText().caretOffset
-            state["intent"]="pending"
-            save()
-            if not target.queryEditableText().insertText(pos,text,len(text)):
-                raise ValueError()
-            state["intent"]="inserted"
-            save()
-            status.setText("Inserted")
-        except Exception:
-            status.setText("Insertion outcome unknown. Check the destination.")
-
     def toggle():
-        nonlocal directory,state,working,target,stop,finished
+        nonlocal directory,state,working,stop,finished,started,replace_session
         if working:
             if not stop.is_set():
                 stop.set()
                 status.setText("Finishing recording")
             return
-        if directory and not state.get("ready"):
-            status.setText("Recover the current recording first")
+        if transfer_active:
+            status.setText("Processing saved audio")
             return
-        target = None if wayland else focused()
+        hide_timer.stop()
+        replace_session = False
+        retry_button.setEnabled(False)
+        reveal()
+        timer.setInterval(100)
+        started = time.monotonic()
+        indicator("Recording")
+        start_button.setText("Stop")
         directory=HOME/secrets.token_hex(16)
         directory.mkdir(mode=0o700)
         state={"applied":0,"ready":False}
@@ -412,17 +475,30 @@ def graphical(listener):
 
     def poll():
         nonlocal working, transfer_active, replace_session
-        read_shortcuts(listener, events)
+        if working and not stop.is_set():
+            seconds = int(time.monotonic() - started)
+            elapsed.setText(f"●  {seconds // 60:02}:{seconds % 60:02}")
+            elapsed.setStyleSheet("color:#ff6277" if seconds % 2 else "color:#ffa3af")
         while not events.empty():
             kind,value=events.get()
             if kind=="toggle":
                 toggle()
+            elif kind=="show":
+                reveal()
             elif kind=="stopped":
                 finished.set()
+                working = False
+                timer.setInterval(700)
+                elapsed.clear()
+                meter.setValue(0)
+                start_button.setText("Record")
+                indicator("Processing" if transfer_active else "Ready")
                 if transfer_active:
                     status.setText("Processing saved audio")
                 else:
                     retry_button.setEnabled(True)
+            elif kind=="level":
+                meter.setValue(value)
             elif kind=="segments":
                 for part in value:
                     if part["index"]==state["applied"]:
@@ -435,6 +511,10 @@ def graphical(listener):
             elif kind=="retry":
                 transfer_active = False
                 message, replace_session = value
+                state["replace_session"] = replace_session
+                save()
+                if finished.is_set():
+                    indicator("Ready")
                 status.setText(message)
                 if finished.is_set():
                     retry_button.setEnabled(True)
@@ -450,22 +530,68 @@ def graphical(listener):
                         fragment.unlink(missing_ok=True)
                     except OSError:
                         status.setText("Text saved. Local audio cleanup is pending.")
-                insert()
+                indicator("Ready")
+                if editor.toPlainText().strip():
+                    copy_result(automatic=True)
             else:
                 status.setText(value)
 
-    def copy():
-        app.clipboard().setText(editor.toPlainText())
+    def copy_result(automatic=False):
+        text = editor.toPlainText()
+        if not text:
+            return
+        clipboard = app.clipboard()
+        clipboard.setText(text)
+        if clipboard.text() != text:
+            status.setText("Clipboard unavailable. Select and copy the text here.")
+            reveal()
+            return
+        status.setText("Copied to clipboard")
+        if not working and not transfer_active:
+            if automatic:
+                hide_timer.start(2200)
+            else:
+                root.hide()
 
-    start_button = QPushButton("Start / Stop")
+    start_button = QPushButton("Record")
     start_button.clicked.connect(toggle)
     retry_button = QPushButton("Retry sync")
     retry_button.setEnabled(False)
     retry_button.clicked.connect(retry)
     copy_button = QPushButton("Copy")
-    copy_button.clicked.connect(copy)
+    copy_button.clicked.connect(lambda: copy_result())
     for button in (start_button, retry_button, copy_button):
         buttons.addWidget(button)
+    recovery = QMenu(root)
+    recover_button = QPushButton("Recover")
+    recover_button.setMenu(recovery)
+    buttons.addWidget(recover_button)
+
+    def recover(saved):
+        nonlocal directory, state, replace_session
+        if working or transfer_active:
+            return
+        hide_timer.stop()
+        directory = saved.parent
+        state = json.loads(saved.read_bytes())
+        replace_session = state.get("replace_session", False)
+        atomic(pointer, directory.name.encode())
+        with QSignalBlocker(editor):
+            editor.setPlainText(state.get("text", ""))
+        stop.set()
+        finished.set()
+        retry()
+
+    def list_recoverable():
+        recovery.clear()
+        if not working and not transfer_active:
+            for saved in sorted(HOME.glob("*/editor.json"), key=lambda f: f.stat().st_mtime, reverse=True):
+                if not json.loads(saved.read_bytes()).get("ready"):
+                    label = time.strftime("%b %d · %H:%M:%S", time.localtime(saved.stat().st_mtime))
+                    recovery.addAction(label, lambda checked=False, file=saved: recover(file))
+        if not recovery.actions():
+            recovery.addAction("No available recordings").setEnabled(False)
+    recovery.aboutToShow.connect(list_recoverable)
     if pointer.exists():
         directory=HOME/pointer.read_text()
         state=json.loads((directory/"editor.json").read_bytes())
@@ -473,29 +599,34 @@ def graphical(listener):
         if state.get("intent")=="pending":
             status.setText("Insertion outcome unknown. Check the destination.")
         elif not state["ready"]:
-            working=True
+            replace_session = state.get("replace_session", False)
             stop.set()
             finished.set()
             status.setText("Recovering saved recording")
-            transfer()
-    hotkeys = tray = None
+            retry()
+    menu.addAction("Record / Stop", toggle)
+    menu.addAction("Show editor", reveal)
+    tray.activated.connect(lambda reason: reveal() if reason == QSystemTrayIcon.Trigger else None)
+    hide = QPushButton("Hide")
+    hide.clicked.connect(root.hide)
+    buttons.addWidget(hide)
+    hotkeys = None
     if not wayland:
         from pynput.keyboard import GlobalHotKeys
-        from PIL import Image, ImageDraw
-        import pystray
-
-        icon = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-        ImageDraw.Draw(icon).ellipse((8, 8, 56, 56), fill="#287b94")
-        tray = pystray.Icon("InnerVoice", icon, "InnerVoice", menu=pystray.Menu(
-            pystray.MenuItem("Record / Stop", lambda *_: events.put(("toggle", None)))))
-        threading.Thread(target=tray.run, daemon=True).start()
-        hotkeys = GlobalHotKeys({cfg.get("hotkey", "<ctrl>+<alt>+v"): lambda: events.put(("toggle", None))})
+        hotkeys = GlobalHotKeys({cfg.get("hotkey", "<cmd>+<shift>+<f8>"): lambda: events.put(("toggle", None))})
         hotkeys.start()
     timer = QTimer()
     timer.timeout.connect(poll)
-    timer.start(100)
+    timer.start(700)
     handlers = {sig: signal.signal(sig, lambda *_: app.quit()) for sig in (signal.SIGTERM, signal.SIGINT)}
-    root.show()
+    notifier = None
+    if isinstance(listener, socket.socket):
+        notifier = QSocketNotifier(listener.fileno(), QSocketNotifier.Read)
+        notifier.activated.connect(lambda _: (read_shortcuts(listener, events), poll()))
+    else:
+        timer.timeout.connect(lambda: read_shortcuts(listener, events))
+    if not wayland and not QSystemTrayIcon.isSystemTrayAvailable():
+        reveal()
     try:
         app.exec_()
     finally:
@@ -505,23 +636,30 @@ def graphical(listener):
         if hotkeys:
             hotkeys.stop()
         if tray:
-            tray.stop()
+            tray.hide()
+        (HOME/"indicator").unlink(missing_ok=True)
 
 
 def main():
     os.umask(0o077)
     action = sys.argv[1] if len(sys.argv) > 1 else ""
-    if action=="setup":
+    if action in ("setup", "agent-setup"):
+        global CONFIG
+        if action == "agent-setup":
+            CONFIG = Path.home()/".config/innervoice-agent/settings.json"
         try:
-            setup()
+            setup(agent=action == "agent-setup")
         except (KeyboardInterrupt, EOFError):
             sys.exit("Setup cancelled.")
         except (OSError, ValueError) as error:
             sys.exit(f"Could not complete desktop setup: {error}")
+    elif action=="power":
+        running = subprocess.run(["systemctl", "--user", "is-active", "--quiet", UNIT]).returncode == 0
+        os.execv(sys.executable, [sys.executable, __file__, "stop" if running else "start"])
     elif action=="start":
         if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
             sys.exit("Start in a graphical desktop session with microphone access.")
-        cmd=["systemd-run","--user","--unit="+UNIT,"--collect"]
+        cmd=["systemd-run","--user","--unit="+UNIT,"--collect","-p","MemoryMax=384M","-p","CPUQuota=100%","-p","TasksMax=96"]
         for key in ("DISPLAY","XAUTHORITY","DBUS_SESSION_BUS_ADDRESS","XDG_RUNTIME_DIR","AT_SPI_BUS_ADDRESS", "XDG_SESSION_TYPE", "WAYLAND_DISPLAY", "QT_QPA_PLATFORM"):
             if key in os.environ:
                 cmd.append("--setenv="+key+"="+os.environ[key])
@@ -530,8 +668,15 @@ def main():
         subprocess.run(["systemctl","--user",action,UNIT],check=True)
     elif action=="run":
         run_graphical()
-    elif action=="toggle":
-        send_toggle()
+    elif action=="check":
+        cfg = json.loads(CONFIG.read_bytes())
+        try:
+            check_gateway(cfg, read_bearer(cfg["token_file"]))
+        except (ValueError, KeyError, OSError, requests.RequestException) as error:
+            sys.exit("Disconnected · " + connection_error(error))
+        print("Connected · Gateway authenticated")
+    elif action in ("toggle", "show"):
+        send_toggle(action.encode())
     else:
         sys.exit("desktop setup|start|status|stop|run|toggle")
 

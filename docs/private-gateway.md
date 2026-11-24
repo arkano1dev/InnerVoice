@@ -24,13 +24,30 @@ Enter the server's IPv4 address on its private LAN, VLAN or virtual network, HTT
 
 Setup reuses the saved certificate and key if they match the chosen IP. If neither exists, it uses OpenSSL to create a self-signed certificate valid for 90 days. You can also install your own `tls.crt` and `tls.key` in the protected secrets directory before setup. For an existing CA-issued certificate, put its trust chain in `ca.crt` in the same directory if setup is creating a smoke-test client.
 
-On first setup, the wizard creates a local smoke-test client if the server has no credential map. Its bearer file, trust certificate and `client.toml` are under `~/.config/innervoice/clients/operator-smoke` by default. From another authorized machine, copy the public trust certificate and bearer file over a protected channel and adapt the paths in the client TOML. For the Telegram agent, provision a separate credential with `./bin/innervoice credential --identity telegram-agent`.
+On first setup, the wizard creates a local smoke-test client if the server has no credential map. Its bearer file, trust certificate and `client.toml` are under `~/.config/innervoice/clients/operator-smoke` by default. From another authorized machine, copy the public trust certificate and bearer file over a protected channel and adapt the paths in the client TOML. For the Telegram agent, provision a separate credential with `./bin/innervoice credential --identity telegram-agent --scope jobs`.
 
 The setup accepts RFC 1918 private ranges and the RFC 6598 shared range (`100.64.0.0/10`) for both the server IP and the client list. On a shared-address virtual network, use the IP assigned to the server and list each authorized client's IP as a `/32`.
 
 The HTTPS listener rejects peers outside the configured private IPv4 addresses or CIDRs before processing bearer credentials. Apply the same restriction at the host/VLAN boundary and verify that Docker forwards the authorized source address. The worker has no published host port. Legacy routes are available inside Compose on `gateway:9000`. The private HTTPS port serves only the versioned API.
 
 First activation replaces the old port mapping. Schedule it after recording the baseline. Fresh setup leaves API job admission disabled until the direct smoke check.
+
+## Daily operation and network boundaries
+
+| Goal | Command or setting |
+| --- | --- |
+| Try a different model | `./bin/innervoice config worker`, then `./bin/innervoice restart`. The worker wizard reuses the saved endpoint, allowlist and credentials. |
+| Change decoding only | For example, `./bin/innervoice config set openai-whisper.beam=3`, then restart. |
+| Leave the server available | Start once. Compose uses `unless-stopped` for the gateway, bot and worker. Enable Docker at boot on the server. |
+| Switch the workstation on or off | `./bin/innervoice-desktop power`. For a shell shortcut, define `alias ivpower='"/absolute/path/to/InnerVoice/bin/innervoice-desktop" power'`. Native installations use `./bin/innervoice desktop power`. |
+| Check the connection on demand | `./bin/innervoice-desktop check` verifies TLS, token and API from the running container. `status` shows process state. |
+| Reopen the last text | `./bin/innervoice-desktop show` or **Show editor** in the indicator menu. |
+
+**Mesh access.** Connect the agent and gateway as direct peers. Give the agent outbound access to the gateway peer and its HTTPS TCP port only. Deny peer traffic routing, LAN access through the peer and file sharing. Apply a default-deny rule to other services on the gateway host too. If the gateway lives behind a separate mesh router, put a peer on the gateway itself or use a destination-and-port-specific firewall rule on a dedicated ingress. A gateway token governs API calls only.
+
+**Listener exposure.** The default publishes HTTPS on the selected private host address. For a multihomed gateway, `config set deployment.listen_all=true` publishes that port on **every IPv4 interface**, including any public interface. Set the Docker-aware ingress policy first. Keep `deployment.bind` as the actual private address clients verify against the certificate. Extra client-facing addresses need their own matching certificate SANs. Set `deployment.listen_all=false` and restart to restore single-address publishing. Never publish the worker or the bot compatibility port. Docker's forwarding rules can bypass ordinary UFW input rules. Verify reachability from an allowed peer and denial from an unauthorized peer and the public side. See [Docker packet filtering](https://docs.docker.com/engine/network/packet-filtering-firewalls/) and the [Meshnet permissions guide](https://support.nordvpn.com/hc/en-us/articles/20278389297041-Guide-for-Meshnet-users).
+
+**Workstation privacy.** The recorder opens the microphone during capture. The panel helper reads a state label and sends local commands through a user-owned socket. The container has no desktop session bus mount. Successful text goes to the system clipboard, where clipboard managers and remote clipboard sync may retain it. Fragments and editor text are readable by the local account and its administrators. Completed fragments are removed, and old saved recordings are cleaned on client startup after 24 hours. Review clipboard history, backups and local disk encryption on sensitive workstations.
 
 ## Check ROCm compatibility with the previous deployment
 
@@ -178,6 +195,14 @@ API requests use Bearer authentication. POST /v1/jobs takes multipart audio plus
 
 ## Agent connection
 
+On the agent host, install Python and `requests` (also `tomli` for Python 3.10). Run the wizard as the identity that executes the provider.
+
+```bash
+./bin/innervoice agent setup
+```
+
+The wizard verifies access to the jobs API, then saves the endpoint, CA reference and owner-only bearer under `~/.config/innervoice-agent/`. Use the absolute path to the saved `settings.json` in the provider command below. Existing TOML configurations remain supported. Issue separate tokens on the gateway with `credential --identity telegram-agent --scope jobs --peer "$AGENT_MESH_IP"`. Use the exact source the gateway sees. The desktop equivalent is `--scope sessions`. After updating the running gateway, re-register existing identities with the desired scope and press Enter at the hidden prompt to keep their token. Earlier unscoped tokens retain both APIs until re-registered. To revoke access remove that identity from the private credential map while the operator CLI is idle. New requests read the map again.
+
 Set up the installed agent's command STT provider only after direct smoke. Example mapping (confirm syntax and timeout in the installed framework):
 
 ```yaml
@@ -186,7 +211,7 @@ stt:
   providers:
     innervoice:
       type: command
-      command: /absolute/path/to/clients/provider.py --config /absolute/private/client.toml {input_path} {output_path}
+      command: python3 /absolute/path/to/clients/provider.py --config /absolute/private/settings.json {input_path} {output_path}
       format: txt
       normalize: false
 ```
@@ -199,7 +224,7 @@ Disable external fallback in the actual agent. The adapter opens its input read-
 
 On the machine with the keyboard and microphone, open a graphical terminal in a local Wayland session. Use Docker Engine with Compose and PulseAudio or PipeWire-Pulse. The container uses the Wayland display socket and the session audio socket. It captures locally and sends audio over HTTPS to Whisper on the server. Use **Copy** in the editor to paste the result into another app.
 
-On the Gateway server, register a client with `./bin/innervoice credential --identity desktop-hotkey`, allow the workstation's source IP, and enable API jobs. Keep the token you entered on the server. For a self-signed Gateway, copy its public `tls.crt` from the default server path `~/.config/innervoice/secrets/tls.crt` to `~/.config/innervoice-desktop/ca.crt` on the workstation. If the Gateway uses a private CA, copy that CA certificate instead. Use `system` at the trust prompt for a certificate trusted by the container's system trust store.
+On the Gateway server, register a client with `./bin/innervoice credential --identity desktop-hotkey --scope sessions`, allow the workstation's source IP, and enable API jobs. Keep the token you entered on the server. For a self-signed Gateway, copy its public `tls.crt` from the default server path `~/.config/innervoice/secrets/tls.crt` to `~/.config/innervoice-desktop/ca.crt` on the workstation. If the Gateway uses a private CA, copy that CA certificate instead. Use `system` at the trust prompt for a certificate trusted by the container's system trust store.
 
 Run these commands from the workstation's checkout:
 
@@ -209,9 +234,11 @@ Run these commands from the workstation's checkout:
 ./bin/innervoice-desktop shortcut
 ```
 
-Enter the Gateway's full HTTPS URL and accept the suggested certificate path. Paste the registered token at the hidden prompt or reuse a local bearer file. The wizard checks TLS, the token, and support for desktop recording before saving. It uses the default microphone and retains advanced settings in an existing configuration. The wizard does not schedule an audio job; the first short recording verifies admission and inference. The `shortcut` command prints the full command to register in your desktop settings. In Ubuntu GNOME, open **Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts**. Add **InnerVoice**, paste the printed command and assign **Ctrl+Alt+V** or another free combination. The compositor calls `toggle` in the running container.
+Enter the Gateway's full HTTPS URL and accept the suggested certificate path. Paste the registered token at the hidden prompt or reuse a local bearer file. The wizard checks TLS, the token, and support for desktop recording before saving. It uses the default microphone and retains advanced settings in an existing configuration. The wizard does not schedule an audio job; the first short recording verifies admission and inference. The `shortcut` command prints the full command to register in your desktop settings. In Ubuntu GNOME, open **Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts**. Add **InnerVoice**, paste the printed command and assign **Super+Shift+F8** or another free combination. The compositor calls `toggle` in the running container.
 
-Press the shortcut once to record and again to stop. Use the editor's **Start / Stop** button to test capture before setting up the shortcut. Use `./bin/innervoice-desktop status`, `logs` or `stop` to manage the client. Settings and saved recordings survive container restarts.
+Press the shortcut once to record and again to stop. Existing shortcuts keep their binding until you change it in Settings. Check for conflicts in your compositor. Run `./bin/innervoice-desktop show` and click **Record** to test before assigning a shortcut. Use `./bin/innervoice-desktop status`, `logs` or `stop` to manage the client. Settings and saved recordings survive container restarts.
+
+**Recorder overlay.** The client starts in the background. Install `python3-pyqt5` on the host and enable a StatusNotifier/AppIndicator tray for the panel light. It turns red while capturing and amber during processing. The compact overlay shows elapsed time and a live microphone level. A successful result copies the full editable text and hides after a short pause. Edit to keep it open, or click **Copy** to copy and hide immediately. A failed transfer leaves **Retry sync** available. Press the shortcut to record a fresh note, or open **Recover** to retry an earlier capture. The compositor controls final window positioning and focus on Wayland.
 
 For acceptance, with another Wayland app focused, record a five-second note with the shortcut and stop it with the same shortcut. Verify that text appears in the editor and can be copied into the other app. Repeat on your normal microphone and private network. Run the lightweight regression tests with `python3 -m unittest discover -s tests -v` from the checkout when `requests` is installed.
 
@@ -225,24 +252,24 @@ export INNERVOICE_DESKTOP_HOST_NETWORK=1
 ./bin/innervoice-desktop start
 ```
 
-Set the same variable whenever you start or reconfigure the desktop client. The container shares the workstation's network namespace in this mode, including access to its network interfaces and local services. The client continues to verify the Gateway certificate and send its bearer token. No ports are published for the desktop service. The default launcher uses Compose's bridge network when the variable is omitted.
+Successful setup saves the selected mode. Existing host-network users can rerun setup once with the variable set and accept the saved connection values. Set it to 0 during setup to switch back. The container shares the workstation's network namespace in this mode, including access to its network interfaces and local services. The client continues to verify the Gateway certificate and send its bearer token. No ports are published for the desktop service. The default launcher uses Compose's bridge network until a different mode is saved or explicitly selected.
 
 ### Run directly on Ubuntu
 
-On a graphical Ubuntu workstation install Python, Qt, PortAudio and a microphone. The X11 mode also uses the AT-SPI bindings for insertion. The server and bot are independent. Run as the logged-in user:
+On a graphical Ubuntu workstation install Python, Qt, PortAudio and a microphone. The server and bot are independent. Run as the logged-in user:
 
 ```bash
-sudo apt install python3-venv python3-pyqt5 qtwayland5 python3-pyatspi libportaudio2
+sudo apt install python3-venv python3-pyqt5 qtwayland5 libportaudio2
 python3 -m venv --system-site-packages "$HOME/.local/share/innervoice-desktop-env"
 . "$HOME/.local/share/innervoice-desktop-env/bin/activate"
-pip install requests tomli sounddevice pynput pystray Pillow
+pip install requests tomli sounddevice pynput
 ./bin/innervoice desktop setup
 ./bin/innervoice desktop start
 ./bin/innervoice desktop status
 ./bin/innervoice desktop stop
 ```
 
-Provision a separate desktop identity with the server CLI before setup. Set the private URL, trust root and token path. Leave source IP empty and port zero for OS selection. On Wayland, point a desktop custom shortcut to the virtual environment's Python interpreter followed by the absolute path to `clients/desktop.py` and the argument `toggle`. On X11, use the hotkey selected at setup. Press once to start and again to stop. The editor appends indexed text while preserving edits. On reconnect the client compares durable fragment indexes. On restart it recovers the saved capture. After recording stops, **Retry sync** resumes a failed transfer from saved audio. If the Gateway session expired or failed permanently, that action starts a replacement session while keeping edited text. Local fragments are removed after the editor has saved the result. On X11, automatic insertion requires the same live editable accessibility object to be focused. On Wayland, copy the result from the editor. Recovered captures have no live destination identity and remain in the editor. An uncertain insertion retains text for inspection and manual copy. Desktop stop affects only the user service. After stopping, archive or remove the user's config, state and virtual environment when decommissioning.
+Provision a separate desktop identity with the server CLI before setup. Set the private URL, trust root and token path. Leave source IP empty and port zero for OS selection. On Wayland, point a desktop custom shortcut to the virtual environment's Python interpreter followed by the absolute path to `clients/desktop.py` and the argument `toggle`. On X11, use the hotkey selected at setup. Press once to start and again to stop. The editor appends indexed text while preserving edits. On reconnect the client compares durable fragment indexes. On restart it recovers the saved capture. After recording stops, **Retry sync** resumes a failed transfer from saved audio. If the Gateway session expired or failed permanently, that action starts a replacement session while keeping edited text. Local fragments are removed after the editor has saved the result. On completion the full editor contents go to the clipboard. Paste in the destination with its usual shortcut. Desktop stop affects only the user service. After stopping, archive or remove the user's config, state and virtual environment when decommissioning.
 
 GET /v1/capabilities advertises sessions. POST /v1/sessions with Idempotency-Key, PUT a mono 16 kHz signed 16-bit WAV to /v1/sessions/{id}/fragments/{index}, GET the session and POST /v1/sessions/{id}/finalize with last_index. Missing indexes are returned in a 409 response. A deliberate recover_prefix request may discard stored fragments beyond the contiguous prefix. Finalization returns a pollable job.
 
@@ -254,4 +281,4 @@ Keep the Gateway allowlist and the host firewall aligned. The private overlay is
 - For the optional Faster Whisper trial, supply a pinned ROCm base with compatible Torch and the ROCm CTranslate2 4.9.0 wheel already installed. Build with `docker build -f whisper/Dockerfile.faster --build-arg CT2_ROCM_IMAGE="$CT2_BASE" -t innervoice-faster:candidate whisper`. Provision the complete converted model directory. Its manifest digest hashes each sorted relative filename plus NUL and its bytes. Fit the trial to the actual GPU and verify local inference. Set the faster-whisper image, image_id, weights and digest with config set, then run `restart --engine faster-whisper`. Restore with `restart --engine openai-whisper`. Roll back a failed transition with the previous image and saved manifest. If reverting to the pre-Gateway application, stop candidate services, restore the previous Compose project and exact retained images/environment, recreate the original bot and worker, and verify the host binding. Keep all data volumes.
 - Trigger restart during a long inference. Verify one ordered result, absence of duplicate segments, prompt progress from a second owner and a short legacy request. Check replays, different bytes under the same key, unknown owner, credential rotation and revocation, expired results, oversized decoded content, silence and names/numbers. Verify bot fast/full, timestamps, defaults/reset and an explicit false override with two distinct users.
 - Compare three or more repeats per fixed fixture per condition via `python3 clients/smoke.py "$CLIENT_CONFIG" "$FIXTURE" "$EXPECTED_TEXT" --repeats 3`. Use a separate one-hour deadline for long fixtures. Measure cold/warm, short-note absolute latency, real-time factor, boundary speech, language mixing and noise, memory, disk, busy conditions and cleanup. Require warm end-to-end RTF at most 1 per representative voiced clip; compare English-source word error rate and rubric-scored translation fidelity against the incumbent. Require zero new critical name, number or meaning errors. Check direct one-hour results separately from actual Telegram download limits.
-- Validate installed provider outage, no external fallback, deadline and silence behavior. Exercise desktop focus changes, record/stop, offline recovery, retained edits, restart during insertion, short final fragment and clipboard fallback. Record observed results by candidate SHA using synthetic IDs only. Keep the real host, fixture content, runtime measurements and deployment manifest private.
+- Validate installed provider outage, no external fallback, deadline and silence behavior. Exercise desktop focus changes, record/stop, offline recovery, retained edits, restart during transfer, short final fragment and clipboard fallback. Record observed results by candidate SHA using synthetic IDs only. Keep the real host, fixture content, runtime measurements and deployment manifest private.
