@@ -337,30 +337,44 @@ def graphical(listener):
                 old.rmdir()
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
-    class Overlay(QWidget):
+    class RecorderWindow(QWidget):
         def closeEvent(self, event):
+            # Keep shortcut capture available through a normal task-switcher window.
             event.ignore()
-            self.hide()
+            self.showMinimized()
 
-    root = Overlay(None, Qt.Tool | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+    root = RecorderWindow()
     root.setWindowTitle("InnerVoice")
-    root.setWindowOpacity(.96)
-    root.resize(440, 220)
+    root.resize(520, 300)
+    root.setMinimumSize(360, 220)
     root.setStyleSheet("""
-        QWidget {background:#15161a;color:#ededf0;font:14px sans-serif}
-        QTextEdit {background:#202127;border:1px solid #41424b;border-radius:8px;padding:8px}
-        QPushButton {background:#303139;border:0;border-radius:7px;padding:6px 12px}
-        QPushButton:hover {background:#484951} QPushButton:disabled {color:#888}
-        QProgressBar {background:#292a31;border:0;border-radius:3px}
-        QProgressBar::chunk {background:#ff556e;border-radius:3px}
+        QWidget {background:#191b20;color:#edeef2;font-size:14px}
+        QLabel#status {color:#bfc7d2}
+        QLabel#elapsed {color:#ff8792;font-weight:600}
+        QTextEdit {background:#23262d;border:1px solid #474d58;border-radius:9px;
+                   padding:10px;font-size:16px;selection-background-color:#376467}
+        QTextEdit:focus, QPushButton:focus {border:1px solid #96d9cf}
+        QPushButton {background:#30353d;border:1px solid #4a505b;border-radius:7px;
+                     padding:6px 10px}
+        QPushButton:hover {background:#414752}
+        QPushButton:pressed {background:#272c33}
+        QPushButton:disabled {color:#969ba3}
+        QPushButton#record {background:#a1dfd3;color:#132521;font-weight:600}
+        QPushButton#record:hover {background:#baeee4}
+        QPushButton#record[recording="true"] {background:#ff9aa5;color:#351319}
+        QProgressBar {background:#30353d;border:0;border-radius:2px}
+        QProgressBar::chunk {background:#ff8792;border-radius:2px}
     """)
     layout = QVBoxLayout(root)
-    layout.setContentsMargins(16, 12, 16, 12)
+    layout.setContentsMargins(18, 14, 18, 14)
+    layout.setSpacing(10)
     header = QHBoxLayout()
     status = QLabel("Ready to record")
+    status.setObjectName("status")
     status.setWordWrap(True)
     header.addWidget(status, 1)
     elapsed = QLabel()
+    elapsed.setObjectName("elapsed")
     header.addWidget(elapsed)
     layout.addLayout(header)
     meter = QProgressBar()
@@ -370,16 +384,16 @@ def graphical(listener):
     editor = QTextEdit()
     editor.setAcceptRichText(False)
     editor.setPlaceholderText("Your transcript appears here")
-    layout.addWidget(editor)
+    editor.setAccessibleName("Transcript")
+    layout.addWidget(editor, 1)
     buttons = QHBoxLayout()
     layout.addLayout(buttons)
     tray = QSystemTrayIcon(app)
     menu = QMenu()
     tray.setContextMenu(menu)
     def reveal():
-        screen = app.primaryScreen()
-        if screen:
-            root.move(screen.availableGeometry().center() - root.rect().center())
+        if root.isMinimized():
+            root.setWindowState(root.windowState() & ~Qt.WindowMinimized)
         root.show()
         root.raise_()
         root.activateWindow()
@@ -402,9 +416,6 @@ def graphical(listener):
     indicator("Ready")
     tray.show()
     started = 0.
-    hide_timer = QTimer(root)
-    hide_timer.setSingleShot(True)
-    hide_timer.timeout.connect(root.hide)
     events=queue.Queue()
     directory=None
     state={}
@@ -420,12 +431,11 @@ def graphical(listener):
             atomic(directory/"editor.json",json.dumps(state).encode())
 
     editor.textChanged.connect(save)
-    editor.textChanged.connect(hide_timer.stop)
 
     def transfer():
         nonlocal transfer_active
         transfer_active = True
-        retry_button.setEnabled(False)
+        retry_button.hide()
         key = state.get("session_key", directory.name)
         threading.Thread(target=network, args=(cfg, directory, key, events, finished), daemon=True).start()
 
@@ -452,14 +462,12 @@ def graphical(listener):
         if transfer_active:
             status.setText("Processing saved audio")
             return
-        hide_timer.stop()
         replace_session = False
-        retry_button.setEnabled(False)
-        reveal()
+        retry_button.hide()
         timer.setInterval(100)
         started = time.monotonic()
         indicator("Recording")
-        start_button.setText("Stop")
+        set_recording(True)
         directory=HOME/secrets.token_hex(16)
         directory.mkdir(mode=0o700)
         state={"applied":0,"ready":False}
@@ -478,7 +486,6 @@ def graphical(listener):
         if working and not stop.is_set():
             seconds = int(time.monotonic() - started)
             elapsed.setText(f"●  {seconds // 60:02}:{seconds % 60:02}")
-            elapsed.setStyleSheet("color:#ff6277" if seconds % 2 else "color:#ffa3af")
         while not events.empty():
             kind,value=events.get()
             if kind=="toggle":
@@ -491,12 +498,12 @@ def graphical(listener):
                 timer.setInterval(700)
                 elapsed.clear()
                 meter.setValue(0)
-                start_button.setText("Record")
+                set_recording(False)
                 indicator("Processing" if transfer_active else "Ready")
                 if transfer_active:
                     status.setText("Processing saved audio")
                 else:
-                    retry_button.setEnabled(True)
+                    retry_button.show()
             elif kind=="level":
                 meter.setValue(value)
             elif kind=="segments":
@@ -504,8 +511,9 @@ def graphical(listener):
                     if part["index"]==state["applied"]:
                         if part["text"]:
                             with QSignalBlocker(editor):
-                                editor.moveCursor(QTextCursor.End)
-                                editor.insertPlainText((" " if editor.toPlainText() else "") + part["text"])
+                                tail = QTextCursor(editor.document())
+                                tail.movePosition(QTextCursor.End)
+                                tail.insertText((" " if editor.toPlainText() else "") + part["text"])
                         state["applied"]+=1
                         save()
             elif kind=="retry":
@@ -517,14 +525,14 @@ def graphical(listener):
                     indicator("Ready")
                 status.setText(message)
                 if finished.is_set():
-                    retry_button.setEnabled(True)
+                    retry_button.show()
             elif kind=="ready":
                 transfer_active = False
                 working=False
                 state["ready"]=True
                 save()
                 status.setText(value)
-                retry_button.setEnabled(False)
+                retry_button.hide()
                 for fragment in directory.glob("*.raw"):
                     try:
                         fragment.unlink(missing_ok=True)
@@ -532,11 +540,11 @@ def graphical(listener):
                         status.setText("Text saved. Local audio cleanup is pending.")
                 indicator("Ready")
                 if editor.toPlainText().strip():
-                    copy_result(automatic=True)
+                    copy_result()
             else:
                 status.setText(value)
 
-    def copy_result(automatic=False):
+    def copy_result():
         text = editor.toPlainText()
         if not text:
             return
@@ -544,24 +552,28 @@ def graphical(listener):
         clipboard.setText(text)
         if clipboard.text() != text:
             status.setText("Clipboard unavailable. Select and copy the text here.")
-            reveal()
             return
         status.setText("Copied to clipboard")
-        if not working and not transfer_active:
-            if automatic:
-                hide_timer.start(2200)
-            else:
-                root.hide()
 
     start_button = QPushButton("Record")
+    start_button.setObjectName("record")
+
+    def set_recording(active):
+        start_button.setText("Stop" if active else "Record")
+        start_button.setProperty("recording", active)
+        start_button.style().unpolish(start_button)
+        start_button.style().polish(start_button)
+
     start_button.clicked.connect(toggle)
     retry_button = QPushButton("Retry sync")
-    retry_button.setEnabled(False)
+    retry_button.hide()
     retry_button.clicked.connect(retry)
     copy_button = QPushButton("Copy")
-    copy_button.clicked.connect(lambda: copy_result())
-    for button in (start_button, retry_button, copy_button):
-        buttons.addWidget(button)
+    copy_button.clicked.connect(copy_result)
+    buttons.addWidget(start_button)
+    buttons.addWidget(retry_button)
+    buttons.addStretch()
+    buttons.addWidget(copy_button)
     recovery = QMenu(root)
     recover_button = QPushButton("Recover")
     recover_button.setMenu(recovery)
@@ -571,7 +583,6 @@ def graphical(listener):
         nonlocal directory, state, replace_session
         if working or transfer_active:
             return
-        hide_timer.stop()
         directory = saved.parent
         state = json.loads(saved.read_bytes())
         replace_session = state.get("replace_session", False)
@@ -607,9 +618,6 @@ def graphical(listener):
     menu.addAction("Record / Stop", toggle)
     menu.addAction("Show editor", reveal)
     tray.activated.connect(lambda reason: reveal() if reason == QSystemTrayIcon.Trigger else None)
-    hide = QPushButton("Hide")
-    hide.clicked.connect(root.hide)
-    buttons.addWidget(hide)
     hotkeys = None
     if not wayland:
         from pynput.keyboard import GlobalHotKeys
@@ -625,8 +633,7 @@ def graphical(listener):
         notifier.activated.connect(lambda _: (read_shortcuts(listener, events), poll()))
     else:
         timer.timeout.connect(lambda: read_shortcuts(listener, events))
-    if not wayland and not QSystemTrayIcon.isSystemTrayAvailable():
-        reveal()
+    root.show()
     try:
         app.exec_()
     finally:

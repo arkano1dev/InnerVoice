@@ -194,6 +194,12 @@ class WaylandDesktopTests(unittest.TestCase):
             def inspect_editor():
                 for widget in app.topLevelWidgets():
                     editor = widget.findChild(QtWidgets.QTextEdit)
+                    if editor is not None and "startup" not in observed:
+                        observed["startup"] = widget.isVisible()
+                        observed["ordinary"] = (
+                            widget.windowType() == QtCore.Qt.Window
+                            and not widget.windowFlags() & (QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+                        )
                     if editor is not None and not observed.get("retried"):
                         labels = [label.text() for label in widget.findChildren(QtWidgets.QLabel)]
                         if "Synthetic gateway failure" in labels:
@@ -205,9 +211,15 @@ class WaylandDesktopTests(unittest.TestCase):
                         continue
                     copy = next(button for button in widget.findChildren(QtWidgets.QPushButton) if button.text() == "Copy")
                     observed["auto"] = app.clipboard().text()
-                    copy.click()
-                    observed["clipboard"] = app.clipboard().text()
-                    app.quit()
+                    app.sendEvent(editor.viewport(), QtCore.QEvent(QtCore.QEvent.Enter))
+                    def check_after_copy_delay():
+                        observed["after_auto"] = widget.isVisible() and not widget.isMinimized()
+                        editor.setPlainText("Edited note")
+                        copy.click()
+                        observed["clipboard"] = app.clipboard().text()
+                        observed["after_copy"] = widget.isVisible() and not widget.isMinimized()
+                        app.quit()
+                    QtCore.QTimer.singleShot(2500, check_after_copy_delay)
                     return
                 QtCore.QTimer.singleShot(30, inspect_editor)
 
@@ -215,7 +227,7 @@ class WaylandDesktopTests(unittest.TestCase):
             with patch.dict(os.environ, env):
                 app = QtWidgets.QApplication([])
                 QtCore.QTimer.singleShot(30, inspect_editor)
-                QtCore.QTimer.singleShot(7000, app.quit)
+                QtCore.QTimer.singleShot(11000, app.quit)
                 with (
                     patch.object(QtWidgets, "QApplication", return_value=app),
                     patch.object(desktop, "HOME", home),
@@ -227,8 +239,10 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertTrue(observed.get("retried"))
             self.assertEqual(len(set(attempts)), 2)
             self.assertEqual(observed.get("auto"), "Test note")
-            self.assertEqual(observed.get("clipboard"), "Test note")
+            for condition in ("startup", "ordinary", "after_auto", "after_copy"):
+                self.assertTrue(observed.get(condition), condition)
+            self.assertEqual(observed.get("clipboard"), "Edited note")
             record = json.loads((home / (home / "current").read_text() / "editor.json").read_text())
-            self.assertEqual(record["text"], "Test note")
+            self.assertEqual(record["text"], "Edited note")
             self.assertTrue(record["ready"])
             self.assertEqual(record["applied"], 1)
