@@ -23,6 +23,12 @@ waiting = {"jobs": 0, "legacy": 0}
 active = None
 previous = None
 
+# Both callers submit bounded audio segments. A hung native thread can keep
+# Gunicorn and its HTTP connection alive long after the GPU has reset.
+INFERENCE_TIMEOUT = int(os.environ.get("IV_INFERENCE_TIMEOUT_SECONDS", "45"))
+if not 5 <= INFERENCE_TIMEOUT <= 590:
+    raise ValueError("IV_INFERENCE_TIMEOUT_SECONDS must be between 5 and 590")
+
 
 class WorkerFault(RuntimeError):
     pass
@@ -33,6 +39,12 @@ def fault_marker():
     return ROOT / "worker-fault"
 
 
+def gpu_dump_present():
+    # Inspect the directory entry only. Reading the dump can consume it.
+    render = Path(os.environ.get("IV_RENDER_NODE", "/dev/dri/renderD128")).name
+    return (Path("/sys/class/drm") / render / "device/devcoredump/data").exists()
+
+
 @contextmanager
 def guarded_dispatch():
     # The caller owns the shared inference lane. Set the latch before releasing it.
@@ -40,12 +52,17 @@ def guarded_dispatch():
     if marker.exists():
         raise WorkerFault("worker_protection_active")
     try:
+        if gpu_dump_present():
+            raise WorkerFault("gpu_coredump")
         yield
     except (requests.ConnectionError, requests.Timeout, WorkerFault) as error:
         from jobs import sync_dir
         marker.touch()
         sync_dir(marker.parent)
-        print("InnerVoice: worker inference interrupted; dispatch paused until gpu-resume", flush=True)
+        reason = "worker_timeout" if isinstance(error, requests.Timeout) else "worker_fault"
+        if isinstance(error, WorkerFault) and error.args == ("gpu_coredump",):
+            reason = "gpu_coredump"
+        print(f"InnerVoice: {reason}; GPU dispatch paused until gpu-resume", flush=True)
         raise WorkerFault("worker_protection_active") from error
 
 
@@ -149,7 +166,7 @@ def transcribe():
         if os.environ.get("ENABLE_JOBS") != "1" or (Path(os.environ.get("STATE_DIR","/state"))/"drain").exists():
             return jsonify(error="gpu_busy",message="Service draining"),503
         with inference_lane("legacy"), guarded_dispatch():
-            return forward("/transcribe", timeout=590)
+            return forward("/transcribe", timeout=INFERENCE_TIMEOUT)
     except WorkerFault:
         return jsonify(error="worker_protection_active"), 503
     finally:
@@ -175,4 +192,6 @@ def health():
 
 @app.get("/gpu-check")
 def gpu_check():
+    if fault_marker().exists():
+        return jsonify(error="worker_protection_active"), 503
     return forward("/gpu-check", timeout=7)

@@ -656,8 +656,34 @@ def operate(args):
             if not args.watch:
                 return
             time.sleep(2)
+    if args.cmd=="update-gateway":
+        if not ACTIVE.exists() or active != cfg:
+            raise ValueError("Gateway-only update requires the current saved deployment to be active.")
+        data = Path(active["deployment"]["data"])
+        if not (data/"worker-fault").exists():
+            raise ValueError("Gateway-only fault recovery requires GPU dispatch already paused.")
+        with contextlib.closing(sqlite3.connect((data/"jobs.db").as_uri()+"?mode=ro",uri=True)) as db:
+            if db.execute("SELECT count(*) FROM jobs WHERE finished IS NULL").fetchone()[0]:
+                raise ValueError("Gateway still has unfinished jobs. Keep the current Gateway running.")
+        compose(active,"build","gateway")
+        compose(active,"up","-d","--no-deps","--no-build","--pull","never","gateway",
+                allowed_networks=client_networks(active["deployment"]["allowed_networks"],resolve=True))
+        print("Gateway updated. Worker and bot kept running; GPU dispatch remains paused.")
+        return
     if args.cmd=="gpu-resume":
-        (Path(active["deployment"]["data"])/"worker-fault").unlink(missing_ok=True)
+        latch = Path(active["deployment"]["data"])/"worker-fault"
+        if latch.exists():
+            # A read timeout abandons the HTTP response, not the native operation.
+            # Verify the original worker slot is free before opening the gate.
+            check = ("import requests,legacy; assert not legacy.gpu_dump_present(); "
+                     "s=requests.Session(); s.trust_env=False; "
+                     "r=s.get('http://whisper:9000/can-transcribe',timeout=(2,7)); "
+                     "r.raise_for_status(); assert r.json().get('can_transcribe') is True")
+            try:
+                compose(active,"exec","-T","gateway","python","-c",check,capture=True,timeout=12)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                raise ValueError("Worker is busy or unavailable, or a GPU coredump is present. Dispatch remains paused.") from error
+            latch.unlink(missing_ok=True)
         print("GPU dispatch enabled. Retry saved recordings from the desktop.")
         return
     if args.cmd=="status":
@@ -741,9 +767,16 @@ def operate(args):
            "pem=open('/run/innervoice/tls.crt').read().split('-----END CERTIFICATE-----')[0]+'-----END CERTIFICATE-----'; "
            "assert s.getpeercert(binary_form=True)==ssl.PEM_cert_to_DER_cert(pem); s.close(); "
            "client=requests.Session(); client.trust_env=False; h=client.get('http://whisper:9000/health',timeout=7).json(); "
-           "g=client.get('http://whisper:9000/gpu-check',timeout=7).json(); "
-           "print(h['engine'],h['model'],h['profile'],g['gpu'].get('available',False))")
-    expected=" ".join((cfg["deployment"]["engine"],cfg[cfg["deployment"]["engine"]]["model"],env(cfg)["IV_REVISION"],"True"))
+           )
+    gpu_paused = (Path(cfg["deployment"]["data"])/"worker-fault").exists()
+    if gpu_paused:
+        probe += "print(h['engine'],h['model'],h['profile'])"
+    else:
+        probe += ("g=client.get('http://whisper:9000/gpu-check',timeout=7).json(); "
+                  "print(h['engine'],h['model'],h['profile'],g['gpu'].get('available',False))")
+    expected=" ".join((cfg["deployment"]["engine"],cfg[cfg["deployment"]["engine"]]["model"],env(cfg)["IV_REVISION"]))
+    if not gpu_paused:
+        expected += " True"
     for _ in range(30):
         try:
             if compose(cfg,"exec","-T","gateway","python","-c",probe,capture=True).stdout.strip()==expected:
@@ -755,7 +788,8 @@ def operate(args):
         compose(cfg,"stop")
         raise ValueError("Activation failed. Inspect 'docker compose logs --tail=80 gateway whisper'. Restore the previous settings before retrying.")
     try:
-        verify_worker_gpu(cfg)
+        if not gpu_paused:
+            verify_worker_gpu(cfg)
     except ValueError:
         compose(cfg, "stop")
         raise
@@ -764,7 +798,7 @@ def operate(args):
     startup.unlink()
     d = cfg["deployment"]
     print(f"Gateway ready at https://{d['bind']}:{d['port']}.")
-    print("Send a short test audio to verify inference.")
+    print("GPU dispatch remains paused." if gpu_paused else "Send a short test audio to verify inference.")
 
 
 def main():
@@ -792,7 +826,7 @@ Daily operation
   stop                   Drain jobs and stop services.
   desktop                Manage a native desktop client (setup/start/stop/status/check).
   agent setup            Save a local connection for the command STT provider.""")
-    parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential","logs","build","worker-only","audit","gpu-resume"])
+    parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential","logs","build","worker-only","audit","gpu-resume","update-gateway"])
     parser.add_argument("action",nargs="?")
     parser.add_argument("values",nargs="*")
     parser.add_argument("--setup",action="store_true",help="walk through private Gateway setup before starting")

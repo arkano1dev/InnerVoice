@@ -396,7 +396,7 @@ def process(row):
                 options["language"] = "es"
             start = time.monotonic()
             response = legacy.upstream_client.post(legacy.worker_url+"/transcribe",allow_redirects=False,files={"audio":("segment.wav",block.getvalue(),"audio/wav")},
-                                     data=options,headers=tags,timeout=(2,590))
+                                     data=options,headers=tags,timeout=(2,legacy.INFERENCE_TIMEOUT))
             worker_request_ms = telemetry.ms(start)
             worker_ms = worker_timing(response, "X-Inference-Ms")
             model_ready_ms = worker_timing(response, "X-Model-Ready-Ms")

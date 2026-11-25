@@ -7,6 +7,8 @@ services:
     ports:
       - "${IV_PUBLISH:?}:${IV_PORT:?}:9443"
     environment:
+      IV_RENDER_NODE: "${IV_RENDER_NODE:-/dev/dri/renderD128}"
+      IV_INFERENCE_TIMEOUT_SECONDS: "${IV_INFERENCE_TIMEOUT_SECONDS:-45}"
       PRIVATE_API: "1"
       IV_ALLOWED_NETWORKS: "${IV_ALLOWED_NETWORKS:?}"
       ENABLE_JOBS: "${IV_ENABLE:-0}"

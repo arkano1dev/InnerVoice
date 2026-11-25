@@ -257,6 +257,25 @@ class StreamingTests(unittest.TestCase):
         self.assertNotIn("segments", kinds)
         self.assertEqual(kinds[-3:], ["replacement", "delivered", "ready"])
 
+    def test_read_timeout_latches_without_another_inference(self):
+        path = self.create("hung", json={"streaming": True})
+        self.upload(path, 0, b"\x01\x00" * (sessions.STREAM_BLOCK // 2))
+        with patch.object(jobs.legacy.upstream_client, "post", side_effect=requests.ReadTimeout) as post:
+            with self.assertRaises(jobs.legacy.WorkerFault):
+                self.process(preview=True)
+        self.assertEqual(post.call_args.kwargs["timeout"], (2, jobs.legacy.INFERENCE_TIMEOUT))
+        self.assertTrue(jobs.legacy.fault_marker().is_file())
+
+    def test_kernel_dump_blocks_worker_before_probe_or_inference(self):
+        path = self.create("dump", json={"streaming": True})
+        self.upload(path, 0, b"\x01\x00" * (sessions.STREAM_BLOCK // 2))
+        with patch.object(jobs.legacy, "gpu_dump_present", return_value=True):
+            with self.assertRaises(jobs.legacy.WorkerFault):
+                self.process(preview=True)
+        jobs.legacy.upstream_client.get.assert_not_called()
+        self.assertFalse(self.worker_calls)
+        self.assertTrue(jobs.legacy.fault_marker().is_file())
+
     def test_numeric_fragment_order_survives_three_digit_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
