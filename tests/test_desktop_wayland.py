@@ -252,7 +252,7 @@ class WaylandDesktopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             config = home / "settings.json"
-            config.write_text('{"microphone": ""}')
+            config.write_text('{"microphone": "", "streaming": true}')
             archived = home / "previous"
             archived.mkdir()
             metadata = archived / "editor.json"
@@ -273,7 +273,7 @@ class WaylandDesktopTests(unittest.TestCase):
             runtime = home / "runtime"
             runtime.mkdir(mode=0o700)
 
-            def capture(directory, stop, events, device, pause):
+            def capture(directory, stop, events, device, pause, block):
                 (directory / "000.raw").write_bytes(b"\x01\x00" * 8)
                 stop.wait(2)
                 events.put(("stopped", None))
@@ -281,6 +281,7 @@ class WaylandDesktopTests(unittest.TestCase):
             attempts = []
             def network(_, directory, ___, events, finished):
                 attempts.append(directory)
+                events.put(("preview", (0, "Draft words")))
                 if finished.wait(2):
                     if len(attempts) == 1:
                         events.put(("retry", ("Synthetic gateway failure", True)))
@@ -308,6 +309,8 @@ class WaylandDesktopTests(unittest.TestCase):
                             widget.windowType() == QtCore.Qt.Window
                             and not widget.windowFlags() & QtCore.Qt.WindowStaysOnTopHint
                         )
+                    if editor is not None and editor.toPlainText() == "Draft words":
+                        observed["inline"] = editor.isReadOnly()
                     if editor is not None and not observed.get("retried"):
                         labels = [label.text() for label in widget.findChildren(QtWidgets.QLabel)]
                         if "Synthetic gateway failure" in labels:
@@ -384,7 +387,8 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertEqual(observed["count"], 10)
             self.assertTrue(observed["cleaned"])
             self.assertTrue(observed["separate"])
-            self.assertEqual(observed["live"], "1")
+            self.assertEqual(observed["live"], "0")
+            self.assertTrue(observed["inline"])
             saved = attempts[-1]
             self.assertTrue((saved / "000.raw").is_file())
             record = json.loads((saved / "editor.json").read_text())

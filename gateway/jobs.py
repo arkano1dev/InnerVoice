@@ -491,7 +491,7 @@ def runnable(db):
     from sessions import STREAM_BLOCK
 
     # A short last upload is reserved for finalization. Refresh the preview after
-    # the first piece, then after at least two more pieces have arrived.
+    # the first piece, then grow the interval with the amount already decoded.
     return db.execute("""
         WITH candidates AS (
             SELECT j.*,s.closed,o.streaming,o.task,o.preview_until,
@@ -506,7 +506,7 @@ def runnable(db):
         )
         SELECT * FROM candidates
         WHERE NOT coalesce(streaming,0) OR closed OR total-done>=?
-           OR (full_until>done AND (preview_until=done OR full_until-preview_until>=2))
+           OR (full_until>done AND (preview_until=done OR full_until-preview_until>=max(2,preview_until-done)))
         ORDER BY is_preview,ready,created
     """, (BLOCK//STREAM_BLOCK,STREAM_BLOCK,PROFILE,time.time(),BLOCK//STREAM_BLOCK)).fetchall()
 

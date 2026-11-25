@@ -466,11 +466,11 @@ def run_graphical():
 def graphical(listener):
     if os.environ.get('IV_DESKTOP_QT') == '6':
         from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QSize
-        from PySide6.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
+        from PySide6.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor, QPainterPath, QRegion
         from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
     else:
         from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QSize
-        from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
+        from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor, QPainterPath, QRegion
         from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
 
     cfg = json.loads(CONFIG.read_bytes())
@@ -497,6 +497,9 @@ def graphical(listener):
 
         def resizeEvent(self, event):
             super().resizeEvent(event)
+            outline = QPainterPath()
+            outline.addRoundedRect(0., 0., float(self.width()), float(self.height()), 20., 20.)
+            self.setMask(QRegion(outline.toFillPolygon().toPolygon()))
             if wayland or not self.isVisible() or self.isMinimized():
                 return
             area = self.screen().availableGeometry()
@@ -512,11 +515,12 @@ def graphical(listener):
 
     root = RecorderWindow(None, Qt.Window | Qt.FramelessWindowHint)
     root.setObjectName("recorderWindow")
+    root.setAttribute(Qt.WA_TranslucentBackground)
     root.setWindowTitle("InnerVoice")
     root.setWindowIcon(app_icon)
     root.setStyleSheet("""
-        QWidget#recorderWindow {background:#17171b}
-        QWidget#pill {background:#19191d;border:1px solid #47474e;border-radius:26px}
+        QWidget#recorderWindow {background:transparent}
+        QWidget#pill {background:#19191d;border:1px solid #47474e;border-radius:20px}
         QLabel {color:#bfbfc7;font-size:12px;background:transparent}
         QTextEdit {background:transparent;color:#e3e3e7;border:0;padding:0;font-size:15px;
                    selection-background-color:#535065}
@@ -561,16 +565,6 @@ def graphical(listener):
     editor.document().setDocumentMargin(2)
     editor.setFixedHeight(24)
     body.addWidget(editor)
-    provisional = QLabel()
-    provisional.setTextFormat(Qt.PlainText)
-    provisional.setWordWrap(True)
-    provisional.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
-    provisional.setMaximumHeight(96)
-    provisional.setAccessibleName("Provisional text")
-    provisional.setStyleSheet("color:#d3c8e7;background:#302d37;border-left:3px solid #ad97ce;padding:4px 8px")
-    provisional.hide()
-    body.addWidget(provisional)
-
     def fit_text(*_):
         if root.isMinimized():
             return
@@ -578,8 +572,7 @@ def graphical(listener):
         screen = root.screen() or app.primaryScreen()
         available = screen.availableGeometry().height()
         controls = max(36, footer.sizeHint().height(), footer.heightForWidth(sheet.width() - 28))
-        preview_height = min(96, provisional.heightForWidth(editor.width())) if not provisional.isHidden() else 0
-        ceiling = max(24, available - controls - 16 - 2 - 48 - preview_height)
+        ceiling = max(24, available - controls - 16 - 2 - 48)
         editor.setFixedHeight(max(24, min(height, ceiling)))
         policy = Qt.ScrollBarAsNeeded if height > ceiling else Qt.ScrollBarAlwaysOff
         if editor.verticalScrollBarPolicy() != policy:
@@ -711,7 +704,7 @@ def graphical(listener):
 
     def first_visible():
         if (timing.get("first") or root.isMinimized() or not root.isVisible()
-                or not (provisional.text().strip() or editor.toPlainText().strip())):
+                or not editor.toPlainText().strip()):
             return
         timing["first"] = True
         if timing.get("session"):
@@ -720,7 +713,8 @@ def graphical(listener):
 
     def save():
         if directory:
-            state["text"] = editor.toPlainText()
+            if not editor.isReadOnly():
+                state["text"] = editor.toPlainText()
             try:
                 atomic(directory / "editor.json", json.dumps(state).encode())
             except OSError as error:
@@ -728,9 +722,16 @@ def graphical(listener):
 
     editor.textChanged.connect(save)
 
+    def render_live(preview=""):
+        confirmed = state.get("text", "")
+        with QSignalBlocker(editor):
+            editor.setPlainText(" ".join(part for part in (confirmed, preview) if part))
+            editor.moveCursor(QTextCursor.End)
+
     def transfer():
         nonlocal transfer_active
         transfer_active = True
+        editor.setReadOnly(state.get("streaming") is True)
         retry_button.hide()
         key = state.get("session_key", directory.name)
         threading.Thread(target=network, args=(cfg, directory, key, events, finished), daemon=True).start()
@@ -790,8 +791,6 @@ def graphical(listener):
         finished=threading.Event()
         working=True
         status.setText("Recording")
-        provisional.clear()
-        provisional.hide()
         streaming, _, block = capture_options(state)
         args = (directory, stop, events, cfg["microphone"], pause)
         capture_thread = threading.Thread(target=capture, args=args + (block,) if streaming else args)
@@ -821,8 +820,7 @@ def graphical(listener):
                 timing["voice"] = value
             elif kind == "preview":
                 confirmed, preview = value
-                provisional.setText(preview if confirmed >= state["applied"] else "")
-                provisional.setVisible(bool(provisional.text()))
+                render_live(preview if confirmed >= state["applied"] else "")
                 fit_text()
                 first_visible()
             elif kind == "paused":
@@ -863,7 +861,10 @@ def graphical(listener):
             elif kind=="segments":
                 for part in value:
                     if part["index"]==state["applied"]:
-                        if part["text"]:
+                        if editor.isReadOnly():
+                            state["text"] = " ".join(filter(None, (state.get("text", ""), part["text"])))
+                            render_live()
+                        elif part["text"]:
                             with QSignalBlocker(editor):
                                 tail = QTextCursor(editor.document())
                                 tail.movePosition(QTextCursor.End)
@@ -873,6 +874,9 @@ def graphical(listener):
                 first_visible()
             elif kind=="retry":
                 transfer_active = False
+                if editor.isReadOnly():
+                    render_live()
+                    editor.setReadOnly(False)
                 message, replace_session = value
                 state["replace_session"] = replace_session
                 save()
@@ -884,8 +888,9 @@ def graphical(listener):
             elif kind=="ready":
                 transfer_active = False
                 working=False
-                provisional.clear()
-                provisional.hide()
+                if editor.isReadOnly():
+                    render_live()
+                    editor.setReadOnly(False)
                 fit_text()
                 state["ready"]=True
                 save()
@@ -998,8 +1003,6 @@ def graphical(listener):
         nonlocal directory, state, replace_session
         if working or transfer_active or playback is not None:
             return
-        provisional.clear()
-        provisional.hide()
         timing.clear()
         directory = saved.parent
         state = json.loads(saved.read_bytes())

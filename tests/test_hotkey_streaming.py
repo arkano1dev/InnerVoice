@@ -149,6 +149,18 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual([s["index"] for s in self.progress(path)["segments"]], [0, 1])
         self.assertEqual([len(entry[0]) for entry in self.worker_calls], [jobs.BLOCK, len(piece), len(piece)])
 
+    def test_long_capture_limits_repeated_preview_decodes(self):
+        path = self.create("bounded", json={"streaming": True, "task": "transcribe"})
+        piece = b"\x01\x00" * (sessions.STREAM_BLOCK // 2)
+        for index in range(15):
+            self.assertEqual(self.upload(path, index, piece).status_code, 201)
+            with jobs.database() as db:
+                pending = jobs.runnable(db)
+            if pending:
+                self.process(preview=index < 14)
+        sizes = [len(pcm) // len(piece) for pcm, _ in self.worker_calls]
+        self.assertEqual(sizes, [1, 3, 6, 12, 15])
+
     def test_short_piece_only_allowed_at_the_end(self):
         path = self.create("short", json={"streaming": True})
         self.assertEqual(self.upload(path, 0, b"\x01\x00").status_code, 201)
