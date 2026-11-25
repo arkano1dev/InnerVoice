@@ -723,6 +723,9 @@ def operate(args):
         if not ACTIVE.exists():
             stop_deployment(cfg)
         return
+    # Keep admission closed if activation fails or the operator is interrupted.
+    startup = Path(cfg["deployment"]["data"]) / "startup-pending"
+    atomic(startup, b"1")
     compose(cfg,"up","-d",*(["--force-recreate"] if args.cmd=="restart" else []),"--no-build","--pull","never","--remove-orphans",
             allowed_networks=allowed_networks)
     print("Waiting for the Gateway and Whisper to respond…", flush=True)
@@ -752,6 +755,7 @@ def operate(args):
         raise
     atomic(ACTIVE,serialize(cfg))
     atomic(FILE,serialize(cfg))
+    startup.unlink()
     d = cfg["deployment"]
     print(f"Gateway ready at https://{d['bind']}:{d['port']}.")
     print("Send a short test audio to verify inference.")

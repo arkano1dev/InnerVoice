@@ -140,7 +140,8 @@ def accepted(row):
 
 
 def paused():
-    return os.environ.get("ENABLE_JOBS") != "1" or not PROFILE or (ROOT / "drain").exists()
+    return (os.environ.get("ENABLE_JOBS") != "1" or not PROFILE
+            or (ROOT / "drain").exists() or (ROOT / "startup-pending").exists())
 
 
 def space_available(budget):

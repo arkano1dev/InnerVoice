@@ -51,7 +51,7 @@ First activation replaces the old port mapping. Schedule it after recording the 
 
 ## Check ROCm compatibility with the previous deployment
 
-The CLI runs a small PyTorch tensor computation in the running Whisper container before it reports the Gateway ready. This checks GPU execution with the selected image, device mapping and environment. Send a short recording after startup to check model loading and transcription.
+The CLI keeps audio submissions paused while it checks HTTPS and runs a small PyTorch tensor computation in the running Whisper container. Admissions open after both checks pass and the active configuration is saved. If activation fails or is interrupted, retry `start` or `restart` after fixing the reported problem. Send a short recording after startup to check model loading and transcription.
 
 If the tensor test fails or Gunicorn replaces a worker with exit status 139, compare the effective runtime settings with the last working deployment. If that deployment used `HSA_OVERRIDE_GFX_VERSION`, restore its verified value in the server's protected `.env` and restart. Keep the value private and specific to the host. The private launcher resolves the default `render` group to the host render node's numeric GID before starting Whisper.
 

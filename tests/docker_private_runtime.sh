@@ -44,6 +44,7 @@ trap cleanup EXIT
 IV_RENDER_NODE=/dev/dri/renderD129 WHISPER_RENDER_GROUP=render "${base[@]}" config --format json whisper |
   python3 -c 'import json,sys; w=json.load(sys.stdin)["services"]["whisper"]; assert w["group_add"] == ["render"]; assert [d["source"] for d in w["devices"] if d["target"] != "/dev/kfd"] == ["/dev/dri/renderD129"]'
 "${stack[@]}" build gateway bot
+touch "$IV_DATA/startup-pending"
 "${stack[@]}" up -d --no-build --pull never
 port=$("${stack[@]}" port gateway 9443 | awk -F: '{print $NF}')
 export PORT="$port"
@@ -76,6 +77,11 @@ for attempt in range(60):
 else:
     raise RuntimeError("Gateway TLS endpoint did not become ready")
 headers = {"Authorization":"Bearer "+token, "Idempotency-Key":"fixture"}
+marker = Path(os.environ["IV_DATA"]) / "startup-pending"
+for method, route in (("POST", "/v1/jobs"), ("POST", "/v1/sessions")):
+    status, result = call(method, route, headers)
+    assert status == 503 and result["error"]["code"] == "admission_disabled", (status, result)
+marker.unlink()
 status, result = call("POST","/v1/sessions",headers)
 assert status == 201, (status,result)
 path = "/v1/sessions/"+result["session_id"]
@@ -83,6 +89,10 @@ audio = io.BytesIO()
 with wave.open(audio,"wb") as stream:
     stream.setparams((1,2,16000,0,"NONE","not compressed"))
     stream.writeframes(bytes((1, 0))*16000)
+marker.touch()
+assert call("PUT",path+"/fragments/0",headers | {"Content-Type":"audio/wav"},audio.getvalue())[0]==503
+assert call("GET",path,headers)[1]["received"] == []
+marker.unlink()
 assert call("PUT",path+"/fragments/0",headers | {"Content-Type":"audio/wav"},audio.getvalue())[0]==201
 assert call("POST",path+"/finalize",headers | {"Content-Type":"application/json"},b'{"last_index":0}')[0]==202
 for attempt in range(30):
