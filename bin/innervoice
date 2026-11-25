@@ -599,6 +599,21 @@ def operate(args):
         return
     validate(cfg)
     active=read(ACTIVE) if ACTIVE.exists() else cfg
+    data = Path(active["deployment"]["data"])
+    latch = data / "worker-fault"
+    pending_hold = data / "telegram-pending-hold"
+    if args.cmd == "gpu-pause":
+        latch.touch()
+        print("GPU dispatch paused. In-flight native work may still be running.")
+        return
+    if args.cmd == "telegram-release-pending":
+        if latch.exists():
+            raise ValueError("GPU dispatch is paused.")
+        pending_hold.unlink(missing_ok=True)
+        print("Telegram may now resume queued notes.")
+        return
+    if args.cmd in ("restart", "worker-only") and latch.exists():
+        raise ValueError("GPU dispatch is paused. Use update-gateway for gateway-only recovery.")
     if args.cmd == "audit":
         if not shutil.which("grype"):
             raise ValueError("Install Grype on the operator host to scan the exact running images")
@@ -675,7 +690,7 @@ def operate(args):
         if latch.exists():
             # A read timeout abandons the HTTP response, not the native operation.
             # Verify the original worker slot is free before opening the gate.
-            check = ("import requests,legacy; assert not legacy.gpu_dump_present(); "
+            check = ("import requests,legacy; assert hasattr(legacy, 'worker_probe'); assert not legacy.gpu_dump_present(); "
                      "s=requests.Session(); s.trust_env=False; "
                      "r=s.get('http://whisper:9000/can-transcribe',timeout=(2,7)); "
                      "r.raise_for_status(); assert r.json().get('can_transcribe') is True")
@@ -683,12 +698,17 @@ def operate(args):
                 compose(active,"exec","-T","gateway","python","-c",check,capture=True,timeout=12)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                 raise ValueError("Worker is busy or unavailable, or a GPU coredump is present. Dispatch remains paused.") from error
+            if active["deployment"]["telegram"]:
+                pending_hold.touch()
             latch.unlink(missing_ok=True)
         print("GPU dispatch enabled. Retry saved recordings from the desktop.")
+        if pending_hold.exists():
+            print("Pending Telegram notes held until telegram-release-pending.")
         return
     if args.cmd=="status":
         print("GPU dispatch:", "paused after worker failure" if
               (Path(active["deployment"]["data"])/"worker-fault").exists() else "enabled")
+        print("Telegram pending queue:", "held" if pending_hold.exists() else "automatic")
         compose(active,"ps")
         print("Saved engine:",cfg["deployment"]["engine"],"active engine:",active["deployment"]["engine"] if ACTIVE.exists() else "unavailable",
               "pending edits:",not ACTIVE.exists() or active!=cfg)
@@ -766,18 +786,20 @@ def operate(args):
            "s=c.wrap_socket(socket.create_connection(('127.0.0.1',9443),3)); "
            "pem=open('/run/innervoice/tls.crt').read().split('-----END CERTIFICATE-----')[0]+'-----END CERTIFICATE-----'; "
            "assert s.getpeercert(binary_form=True)==ssl.PEM_cert_to_DER_cert(pem); s.close(); "
-           "client=requests.Session(); client.trust_env=False; h=client.get('http://whisper:9000/health',timeout=7).json(); "
            )
-    gpu_paused = (Path(cfg["deployment"]["data"])/"worker-fault").exists()
-    if gpu_paused:
-        probe += "print(h['engine'],h['model'],h['profile'])"
+    paused_start = latch.exists()
+    if paused_start:
+        probe += "print('gateway TLS ready')"
+        expected = "gateway TLS ready"
     else:
-        probe += ("g=client.get('http://whisper:9000/gpu-check',timeout=7).json(); "
+        probe += ("import legacy; legacy.require_dispatch(); client=requests.Session(); client.trust_env=False; "
+                  "h=client.get('http://whisper:9000/health',timeout=7).json(); legacy.require_dispatch(); "
+                  "g=client.get('http://whisper:9000/gpu-check',timeout=7).json(); "
                   "print(h['engine'],h['model'],h['profile'],g['gpu'].get('available',False))")
-    expected=" ".join((cfg["deployment"]["engine"],cfg[cfg["deployment"]["engine"]]["model"],env(cfg)["IV_REVISION"]))
-    if not gpu_paused:
-        expected += " True"
+        expected=" ".join((cfg["deployment"]["engine"],cfg[cfg["deployment"]["engine"]]["model"],env(cfg)["IV_REVISION"],"True"))
     for _ in range(30):
+        if not paused_start and latch.exists():
+            raise ValueError("GPU fault during activation. Services preserved for inspection.")
         try:
             if compose(cfg,"exec","-T","gateway","python","-c",probe,capture=True).stdout.strip()==expected:
                 break
@@ -785,20 +807,22 @@ def operate(args):
             pass
         time.sleep(2)
     else:
-        compose(cfg,"stop")
-        raise ValueError("Activation failed. Inspect 'docker compose logs --tail=80 gateway whisper'. Restore the previous settings before retrying.")
+        latch.touch()
+        raise ValueError("Activation check failed. Dispatch paused; inspect the running services.")
+    if not paused_start and latch.exists():
+        raise ValueError("GPU fault during activation. Services preserved for inspection.")
     try:
-        if not gpu_paused:
+        if not paused_start:
             verify_worker_gpu(cfg)
     except ValueError:
-        compose(cfg, "stop")
+        latch.touch()
         raise
     atomic(ACTIVE,serialize(cfg))
     atomic(FILE,serialize(cfg))
     startup.unlink()
     d = cfg["deployment"]
     print(f"Gateway ready at https://{d['bind']}:{d['port']}.")
-    print("GPU dispatch remains paused." if gpu_paused else "Send a short test audio to verify inference.")
+    print("GPU dispatch remains paused." if paused_start else "Send a short test audio to verify inference.")
 
 
 def main():
@@ -826,7 +850,7 @@ Daily operation
   stop                   Drain jobs and stop services.
   desktop                Manage a native desktop client (setup/start/stop/status/check).
   agent setup            Save a local connection for the command STT provider.""")
-    parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential","logs","build","worker-only","audit","gpu-resume","update-gateway"])
+    parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential","logs","build","worker-only","audit","gpu-resume","gpu-pause","telegram-release-pending","update-gateway"])
     parser.add_argument("action",nargs="?")
     parser.add_argument("values",nargs="*")
     parser.add_argument("--setup",action="store_true",help="walk through private Gateway setup before starting")

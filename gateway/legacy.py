@@ -42,7 +42,17 @@ def fault_marker():
 def gpu_dump_present():
     # Inspect the directory entry only. Reading the dump can consume it.
     render = Path(os.environ.get("IV_RENDER_NODE", "/dev/dri/renderD128")).name
-    return (Path("/sys/class/drm") / render / "device/devcoredump/data").exists()
+    device = Path("/sys/class/drm") / render / "device"
+    if os.environ.get("PRIVATE_API") == "1" and not device.is_dir():
+        raise WorkerFault("render_node_unavailable")
+    return (device / "devcoredump/data").exists()
+
+
+def require_dispatch():
+    if fault_marker().exists():
+        raise WorkerFault("worker_protection_active")
+    if gpu_dump_present():
+        raise WorkerFault("gpu_coredump")
 
 
 @contextmanager
@@ -52,16 +62,15 @@ def guarded_dispatch():
     if marker.exists():
         raise WorkerFault("worker_protection_active")
     try:
-        if gpu_dump_present():
-            raise WorkerFault("gpu_coredump")
+        require_dispatch()
         yield
-    except (requests.ConnectionError, requests.Timeout, WorkerFault) as error:
+    except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError, WorkerFault) as error:
         from jobs import sync_dir
         marker.touch()
         sync_dir(marker.parent)
         reason = "worker_timeout" if isinstance(error, requests.Timeout) else "worker_fault"
-        if isinstance(error, WorkerFault) and error.args == ("gpu_coredump",):
-            reason = "gpu_coredump"
+        if isinstance(error, WorkerFault):
+            reason = str(error)
         print(f"InnerVoice: {reason}; GPU dispatch paused until gpu-resume", flush=True)
         raise WorkerFault("worker_protection_active") from error
 
@@ -134,22 +143,16 @@ def forward(path, *, timeout):
         headers["Content-Type"] = request.content_type or "application/octet-stream"
         body = request.get_data(cache=False)
 
-    try:
-        upstream = upstream_client.request(
-            request.method,
-            f"{worker_url}{path}",
-            params=request.args,
-            data=body,
-            headers=headers,
-            timeout=(2, timeout),
-            allow_redirects=False,
-        )
-        if path == "/transcribe":
-            check_dispatch(upstream)
-    except requests.RequestException:
-        if path == "/transcribe":
-            raise
-        return jsonify(error="worker_unavailable"), 502
+    upstream = upstream_client.request(
+        request.method,
+        f"{worker_url}{path}",
+        params=request.args,
+        data=body,
+        headers=headers,
+        timeout=(2, timeout),
+        allow_redirects=False,
+    )
+    check_dispatch(upstream)
 
     return Response(
         upstream.content,
@@ -173,25 +176,38 @@ def transcribe():
         legacy_slot.release()
 
 
+def worker_probe(path, timeout):
+    # Polls must not wait behind inference and accidentally time out their caller.
+    global active
+    if fault_marker().with_name("startup-pending").exists():
+        return jsonify(can_transcribe=False, error="admission_disabled"), 503
+    with condition:
+        if active is not None or any(waiting.values()):
+            return jsonify(can_transcribe=False, error="gpu_busy"), 503
+        active = "probe"
+    try:
+        with guarded_dispatch():
+            return forward(path, timeout=timeout)
+    except WorkerFault:
+        return jsonify(can_transcribe=False, error="worker_protection_active"), 503
+    finally:
+        with condition:
+            active = None
+            condition.notify_all()
+
+
 @app.get("/can-transcribe")
 def can_transcribe():
-    if fault_marker().exists():
-        return jsonify(can_transcribe=False, error="worker_protection_active"), 503
-    if not legacy_slot.acquire(blocking=False):
-        return jsonify(can_transcribe=False, message="Whisper is processing audio. Try again when free."), 503
-    try:
-        return forward("/can-transcribe", timeout=7)
-    finally:
-        legacy_slot.release()
+    if fault_marker().with_name("telegram-pending-hold").exists():
+        return jsonify(can_transcribe=False, error="pending_queue_held"), 503
+    return worker_probe("/can-transcribe", 7)
 
 
 @app.get("/health")
 def health():
-    return forward("/health", timeout=2)
+    return worker_probe("/health", 7)
 
 
 @app.get("/gpu-check")
 def gpu_check():
-    if fault_marker().exists():
-        return jsonify(error="worker_protection_active"), 503
-    return forward("/gpu-check", timeout=7)
+    return worker_probe("/gpu-check", 7)

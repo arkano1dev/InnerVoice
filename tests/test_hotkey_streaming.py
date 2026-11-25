@@ -276,6 +276,65 @@ class StreamingTests(unittest.TestCase):
         self.assertFalse(self.worker_calls)
         self.assertTrue(jobs.legacy.fault_marker().is_file())
 
+    def test_all_telegram_endpoints_respect_fault(self):
+        legacy = jobs.legacy
+        self.enterContext(patch.object(legacy.app, "before_request_funcs", {}))
+        self.enterContext(patch.dict(legacy.os.environ, ENABLE_JOBS="1"))
+        client = legacy.app.test_client()
+        legacy.fault_marker().touch()
+        with patch.object(legacy.upstream_client, "request") as call:
+            for path in ("/health", "/gpu-check", "/can-transcribe", "/transcribe"):
+                response = client.open(path, method="POST" if path == "/transcribe" else "GET")
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.json["error"], "worker_protection_active")
+            call.assert_not_called()
+
+    def test_probe_contention_and_pending_hold_do_not_latch(self):
+        legacy = jobs.legacy
+        self.enterContext(patch.object(legacy.app, "before_request_funcs", {}))
+        client = legacy.app.test_client()
+        with patch.object(legacy.upstream_client, "request") as call:
+            with legacy.inference_lane("jobs"):
+                self.assertEqual(client.get("/health").json["error"], "gpu_busy")
+            legacy.fault_marker().with_name("telegram-pending-hold").touch()
+            self.assertEqual(client.get("/can-transcribe").json["error"], "pending_queue_held")
+            call.assert_not_called()
+            self.assertFalse(legacy.fault_marker().exists())
+            call.side_effect = requests.ReadTimeout
+            self.assertEqual(client.get("/health").status_code, 503)
+            self.assertTrue(legacy.fault_marker().exists())
+
+    def test_invisible_render_node_prevents_private_dispatch(self):
+        legacy = jobs.legacy
+        with patch.dict(legacy.os.environ, PRIVATE_API="1", IV_RENDER_NODE="/dev/dri/test-missing"):
+            with self.assertRaises(legacy.WorkerFault):
+                with legacy.guarded_dispatch():
+                    self.fail("unobserved GPU reached")
+        self.assertTrue(legacy.fault_marker().exists())
+
+    def test_failed_partial_reprocess_preserves_transcript_and_tail(self):
+        directory = jobs.ROOT / "partial"
+        directory.mkdir()
+        state = {"ready": False, "text": "edited", "reprocess_key": "again"}
+        metadata = directory / "editor.json"
+        metadata.write_text(json.dumps(state))
+        audio = directory / "000.raw"
+        audio.write_bytes(b"\x01\x00")
+        finished = threading.Event()
+        finished.set()
+        events = queue.Queue()
+        with patch.object(desktop, "Client") as client, patch.object(desktop, "metric"):
+            client.return_value.call.side_effect = [
+                {"session_id": "retry"},
+                {"received": [], "segments": [{"index": 0, "text": "partial"}],
+                 "state": "failed", "error": {"code": "worker_protection_active"}},
+            ]
+            desktop.network({}, directory, "again", events, finished)
+        self.assertEqual(json.loads(metadata.read_text()), state)
+        self.assertEqual(audio.read_bytes(), b"\x01\x00")
+        self.assertEqual(list(events.queue)[-1], ("retry", (desktop.GPU_PAUSED, True)))
+        self.assertFalse({"segments", "replacement", "preview"} & {kind for kind, _ in events.queue})
+
     def test_numeric_fragment_order_survives_three_digit_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)

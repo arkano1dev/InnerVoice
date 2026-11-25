@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Read-only incident snapshot. Run from the server checkout, including before an update."""
+import argparse
+from datetime import datetime
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+
+
+def output(*args):
+    return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
+
+
+def events(args, pattern):
+    # Keep timestamps and known event fields only. Raw logs may contain private data.
+    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in process.stdout:
+        match = pattern.search(line)
+        if match:
+            print(line.split()[0], match.group())
+        elif "IV_METRIC " in line:
+            try:
+                metric = json.loads(line.split("IV_METRIC ", 1)[1])
+                print(line.split()[0], metric["event"], {
+                    k: metric[k] for k in ("index", "worker_request_ms", "inference_ms", "audio_seconds")
+                    if k in metric})
+            except (ValueError, KeyError, TypeError):
+                continue
+    if process.wait():
+        print("Log source unavailable. Check journal access or container retention.")
+
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--since", default="3h", help="Docker log lookback, e.g. 3h or 24h")
+parser.add_argument("--boot", default="0", help="Kernel journal boot offset, e.g. -1")
+args = parser.parse_args()
+print("local", datetime.now().astimezone().isoformat(), "boot", Path("/proc/sys/kernel/random/boot_id").read_text().strip())
+print("checkout", output("git", "rev-parse", "HEAD").strip())
+kernel = re.compile(r"REMOVE_QUEUE|Failed to evict process queues|GPU reset[^\n]{0,40}|amdgpu_job_timedout")
+events(["journalctl", "--utc", "-k", "-b", args.boot, "-o", "short-iso-precise", "--no-pager"], kernel)
+logs = re.compile(r"worker_timeout|worker_fault|gpu_coredump|render_node_unavailable|worker_protection_active|hipError\w+|Booting worker with pid: \d+|Worker \(pid:\d+\) exited with code \d+|Handling signal: \w+|Resumed queued audio|Processing audio with duration [\d:.]+|Disable swap")
+for service in ("gateway", "whisper", "bot"):
+    ids = output("docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project.working_dir={Path.cwd()}",
+                 "--filter", f"label=com.docker.compose.service={service}").split()
+    if not ids:
+        print(service, "no matching container")
+    for ident in ids:
+        print(service, ident, output("docker", "inspect", "-f",
+              "{{.Image}} {{.State.Status}} started={{.State.StartedAt}} restarts={{.RestartCount}} oom={{.State.OOMKilled}}",
+              ident).strip())
+        files = {"gateway": ["legacy.py", "jobs.py", "sessions.py", "server.py"], "whisper": ["whisper_server.py"]}.get(service, [])
+        for name in files:
+            try:
+                live = output("docker", "exec", ident, "sha256sum", "/app/" + name).split()[0]
+                print(name, live, "matches_checkout", live == hashlib.sha256((Path(service) / name).read_bytes()).hexdigest())
+            except subprocess.CalledProcessError:
+                print(name, "unavailable")
+        if service == "gateway":
+            probe = """import os
+from pathlib import Path
+import legacy
+render = Path(os.getenv('IV_RENDER_NODE','/dev/dri/renderD128')).name
+node = Path('/sys/class/drm') / render / 'device'
+print('timeout', getattr(legacy,'INFERENCE_TIMEOUT','older code'), 'marker', Path('/state/worker-fault').exists(),
+      'render',render,'pci',node.resolve().name,'visible',node.is_dir(),'dump', (node/'devcoredump/data').exists())
+"""
+            try:
+                print(output("docker", "exec", ident, "python", "-B", "-c", probe).strip())
+            except subprocess.CalledProcessError:
+                print("Gateway runtime inspection unavailable")
+        elif service == "whisper":
+            print("devices", output("docker", "inspect", "-f", "{{range .HostConfig.Devices}}{{.PathOnHost}} {{end}}", ident).strip())
+        events(["docker", "logs", "--timestamps", "--since", args.since, ident], logs)

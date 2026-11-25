@@ -311,7 +311,7 @@ def network(cfg, directory, key, events, finished):
     except (OSError, ValueError, AttributeError):
         events.put(("retry", ("Could not read the saved recording settings.", False)))
         return
-    reprocessing = bool(state.get("ready") and state.get("reprocess_key") == key)
+    reprocessing = bool(state.get("reprocess_key") == key)
     poll_seconds, ui_poll_ms = delivery_intervals(cfg)
 
     path = None
@@ -766,7 +766,7 @@ def graphical(listener):
         nonlocal replace_session
         if playback is not None or transfer_active or not finished.is_set() or not directory or not audio_available():
             return
-        if state.get("ready"):
+        if state.get("ready") or state.get("reprocess_key") or (replace_session and state.get("text")):
             if replace_session or not state.get("reprocess_key"):
                 state["reprocess_key"] = secrets.token_hex(16)
             replace_session = False

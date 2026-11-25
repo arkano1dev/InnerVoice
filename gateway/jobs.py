@@ -382,7 +382,8 @@ def process(row):
                         return
             probe_start = time.monotonic()
             ready = legacy.upstream_client.get(legacy.worker_url+"/can-transcribe",allow_redirects=False,timeout=(2,7))
-            if ready.status_code==503 and not preview:
+            legacy.check_dispatch(ready)
+            if ready.status_code == 503:
                 # Busy after an interrupted response is occupancy, not a new inference failure.
                 with database() as db:
                     db.execute("UPDATE jobs SET state='queued',ready=? WHERE id=?",(time.time()+2,ident))
@@ -395,6 +396,7 @@ def process(row):
             if task == "transcribe":
                 options["language"] = "es"
             start = time.monotonic()
+            legacy.require_dispatch()
             response = legacy.upstream_client.post(legacy.worker_url+"/transcribe",allow_redirects=False,files={"audio":("segment.wav",block.getvalue(),"audio/wav")},
                                      data=options,headers=tags,timeout=(2,legacy.INFERENCE_TIMEOUT))
             worker_request_ms = telemetry.ms(start)
@@ -524,7 +526,7 @@ def run():
                 if legacy.fault_marker().exists():
                     db.execute("""UPDATE jobs SET state='failed',finished=?,error='worker_protection_active'
                                   WHERE finished IS NULL""", (time.time(),))
-                rows = runnable(db)
+                rows = [] if (ROOT / "startup-pending").exists() else runnable(db)
                 owners = sorted({r["owner"] for r in rows})
                 if owners:
                     if not rows[0]["is_preview"]:

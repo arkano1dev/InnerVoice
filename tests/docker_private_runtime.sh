@@ -18,8 +18,12 @@ openssl rand -hex 32 > "$IV_BEARER_FILE"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=fixture -addext subjectAltName=IP:127.0.0.1 \
   -keyout "$IV_SECRETS/tls.key" -out "$IV_SECRETS/tls.crt" 2>/dev/null
 # Build the real Gateway and bot. Exercise worker request handling with a CPU fixture model.
+mkdir -p "$temp/sys-class/drm/renderD128/device"
 cat > "$temp/worker.yml" <<YAML
 services:
+  gateway:
+    volumes:
+      - "$temp/sys-class:/sys/class:ro"
   whisper:
     container_name: $COMPOSE_PROJECT_NAME-worker
     build: !reset null
