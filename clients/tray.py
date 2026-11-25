@@ -1,18 +1,21 @@
-"""Host indicator for a sandboxed Wayland recorder. Only reads its state label."""
+"""Reflect the local recorder state in the panel and installed launcher."""
 import os
 from pathlib import Path
 import socket
 import sys
 
-from PyQt5.QtCore import QFileSystemWatcher, Qt
-from PyQt5.QtGui import QColor, QIcon, QPainter
+from desktop_icons import APP_ID, icon_path
+from install_launcher import update_icon
+
+from PyQt5.QtCore import QFileSystemWatcher
+from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 state = Path.home()/".local/state/innervoice-desktop"
 app = QApplication(sys.argv)
 app.setApplicationName("InnerVoice")
-app.setDesktopFileName("io.github.arkano1dev.InnerVoice")
-app_icon = QIcon(str(Path(__file__).with_name("assets") / "innervoice.png"))
+app.setApplicationDisplayName("InnerVoice")
+app.setDesktopFileName(APP_ID)
 app.setQuitOnLastWindowClosed(False)
 if not QSystemTrayIcon.isSystemTrayAvailable():
     sys.exit("Enable an AppIndicator/StatusNotifier tray in the desktop shell.")
@@ -33,15 +36,12 @@ def refresh():
         label = (state/"indicator").read_text()
     except OSError:
         label = "Offline"
-    pix = app_icon.pixmap(32, 32)
-    paint = QPainter(pix)
-    paint.setRenderHint(QPainter.Antialiasing)
-    paint.setPen(Qt.NoPen)
-    paint.setBrush(QColor({"Recording":"#ff354e", "Ready":"#75d9cf", "Processing":"#efbe67"}.get(label, "#808088")))
-    paint.drawEllipse(21, 21, 8, 8)
-    paint.end()
-    tray.setIcon(QIcon(pix))
-    tray.setToolTip("InnerVoice · " + label)
+    tray.setIcon(QIcon(str(icon_path(label))))
+    tray.setToolTip("InnerVoice")
+    try:
+        update_icon(label)
+    except OSError as error:
+        print(f"Launcher icon unavailable: {error.strerror}", file=sys.stderr)
 
 
 menu.addAction("Record / Stop", lambda: command(b"toggle"))

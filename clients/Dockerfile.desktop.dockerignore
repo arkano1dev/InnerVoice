@@ -1,6 +1,11 @@
 *
 !desktop.py
+!desktop_icons.py
 !provider.py
 !recording_storage.py
 !assets/
 !assets/innervoice.png
+!assets/innervoice-ready.png
+!assets/innervoice-recording.png
+!assets/innervoice-processing.png
+!assets/innervoice-paused.png

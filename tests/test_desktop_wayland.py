@@ -152,6 +152,23 @@ class WaylandDesktopTests(unittest.TestCase):
         self.assertIsInstance(pressed, float)
         self.assertTrue(events.empty())
 
+    def test_installed_launcher_tracks_state_with_one_identity(self):
+        import install_launcher
+        from desktop_icons import APP_ID, PHASES, icon_path
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, XDG_DATA_HOME=tmp, HOME=tmp):
+            install_launcher.main()
+            entry = Path(tmp, "applications", APP_ID + ".desktop")
+            for phase in (*PHASES, None):
+                install_launcher.update_icon(phase)
+                fields = dict(line.split("=", 1) for line in entry.read_text().splitlines() if "=" in line)
+                self.assertEqual(fields["Name"], "InnerVoice")
+                self.assertEqual(fields["StartupWMClass"], APP_ID)
+                self.assertEqual(Path(fields["Icon"]).read_bytes(), icon_path(phase).read_bytes())
+                stamp = entry.stat().st_ino
+                install_launcher.update_icon(phase)
+                self.assertEqual(entry.stat().st_ino, stamp)
+            self.assertEqual(list(entry.parent.glob("*.desktop")), [entry])
+
     def test_launcher_prints_absolute_shortcut_and_requires_wayland(self):
         launcher = ROOT / "bin" / "innervoice-desktop"
         with tempfile.TemporaryDirectory() as directory:

@@ -3,8 +3,12 @@ import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+from desktop_icons import APP_ID, PHASES, icon_path
+
 
 def install_file(path, contents):
+    if path.is_file() and path.read_bytes() == contents:
+        return
     with NamedTemporaryFile(dir=path.parent, delete=False) as pending:
         temporary = Path(pending.name)
         try:
@@ -16,13 +20,38 @@ def install_file(path, contents):
             temporary.unlink(missing_ok=True)
 
 
-def main():
-    app_id = "io.github.arkano1dev.InnerVoice"
-    clients = Path(__file__).resolve().parent
+def data_home():
     fallback = Path.home() / ".local/share"
     data = Path(os.environ.get("XDG_DATA_HOME") or fallback)
     if not data.is_absolute():
         data = fallback
+    return data
+
+
+def entry_path():
+    return data_home() / "applications" / f"{APP_ID}.desktop"
+
+
+def installed_icon(phase):
+    return data_home() / "icons/hicolor/128x128/apps" / (APP_ID + ("-" + phase.lower() if phase in PHASES else "") + ".png")
+
+
+def update_icon(phase):
+    path = entry_path()
+    if path.is_file():
+        lines = path.read_text().splitlines(keepends=True)
+        icon = icon_field(phase)
+        install_file(path, "".join(icon if line.startswith("Icon=") else line for line in lines).encode())
+
+
+def icon_field(phase):
+    path = str(installed_icon(phase)).replace("\\", "\\\\")
+    return f"Icon={path}\n"
+
+
+def main():
+    clients = Path(__file__).resolve().parent
+    data = data_home()
     applications = data / "applications"
     icons = data / "icons/hicolor/128x128/apps"
     applications.mkdir(parents=True, exist_ok=True)
@@ -36,19 +65,29 @@ def main():
     for char in ('\\', '"', '`', '$'):
         command = command.replace(char, '\\' + char)
     command = command.replace('\\', '\\\\')
+    try:
+        phase = (Path.home()/".local/state/innervoice-desktop/indicator").read_text().strip()
+    except OSError:
+        phase = None
     entry = (
         "[Desktop Entry]\n"
         "Type=Application\n"
         "Name=InnerVoice\n"
         "Comment=Record and transcribe speech\n"
         f'Exec="{command}" open\n'
-        f"Icon={app_id}\n"
+        f"{icon_field(phase)}"
+        f"StartupWMClass={APP_ID}\n"
         "Terminal=false\n"
         "Categories=AudioVideo;Audio;\n"
     )
-    install_file(icons / f"{app_id}.png", (clients / "assets/innervoice.png").read_bytes())
-    install_file(applications / f"{app_id}.desktop", entry.encode())
+    for phase in (None, *PHASES):
+        install_file(installed_icon(phase), icon_path(phase).read_bytes())
+    install_file(entry_path(), entry.encode())
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if sys.argv[1:] == ["--clear-status"]:
+        update_icon(None)
+    else:
+        main()

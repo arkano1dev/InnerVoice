@@ -239,6 +239,8 @@ Run these commands from the workstation's checkout:
 
 Enter the Gateway's full HTTPS URL and accept the suggested certificate path. Paste the registered token at the hidden prompt or reuse a local bearer file. The wizard checks TLS, the token, and support for desktop recording before saving. It uses the default microphone and retains advanced settings in an existing configuration. The wizard does not schedule an audio job; the first short recording verifies admission and inference. The `shortcut` command prints the full command to register in your desktop settings. In Ubuntu GNOME, open **Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts**. Add **InnerVoice**, paste the printed command and assign **Super+Shift+F8** or another free combination. The compositor calls `toggle` in the running container.
 
+Starting or updating the desktop also registers **InnerVoice** and its icon in your application menu. With the host indicator running, the panel and launcher use the same status colors: teal for ready, red for recording, amber for processing and violet for paused.
+
 For daily use, launch **InnerVoice** from Applications or run `./bin/innervoice-desktop open`. It reuses the desktop image and your saved settings. After pulling changes to the desktop application or its dependencies, run `./bin/innervoice-desktop update` to rebuild and start it.
 
 Press the shortcut once to record and again to stop. Existing shortcuts keep their binding until you change it in Settings. Check for conflicts in your compositor. Run `./bin/innervoice-desktop show` and click **Record** to test before assigning a shortcut. Use `./bin/innervoice-desktop status`, `logs` or `stop` to manage the client. Settings and saved recordings survive container restarts.

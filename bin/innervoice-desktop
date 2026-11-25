@@ -58,7 +58,6 @@ if [[ "$action" == install ]]; then
         "$repo_dir/bin/innervoice-desktop" setup
     fi
     "$repo_dir/bin/innervoice-desktop" start
-    python3 "$repo_dir/clients/install_launcher.py"
     printf 'Open InnerVoice from Applications. Optional shortcut command:\n'
     "$repo_dir/bin/innervoice-desktop" shortcut
     exit
@@ -117,6 +116,7 @@ if [[ "$action" == setup || "$action" == start || "$action" == update ]]; then
     if [[ "$action" == update ]]; then
         "${compose[@]}" build desktop
     fi
+    python3 "$repo_dir/clients/install_launcher.py"
     # Compose builds a missing image and otherwise reuses the local one.
     if output=$("${compose[@]}" up -d desktop 2>&1); then
         printf '%s\n' "$output"
@@ -136,6 +136,9 @@ if [[ "$action" == setup || "$action" == start || "$action" == update ]]; then
         "${compose[@]}" up -d desktop
     fi
     if /usr/bin/python3 -c 'from PyQt5.QtWidgets import QSystemTrayIcon' 2>/dev/null; then
+        if [[ "$action" == update ]]; then
+            systemctl --user stop innervoice-indicator.service 2>/dev/null || true
+        fi
         if ! systemctl --user is-active --quiet innervoice-indicator.service; then
             systemd-run --user --collect --unit=innervoice-indicator --setenv=QT_QPA_PLATFORM=wayland --setenv=WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" /usr/bin/python3 "$repo_dir/clients/tray.py" || echo "Panel indicator unavailable. The recorder overlay remains accessible."
         fi
@@ -153,6 +156,7 @@ case "$action" in
     stop)
         systemctl --user stop innervoice-indicator.service 2>/dev/null || true
         "${compose[@]}" stop desktop
+        python3 "$repo_dir/clients/install_launcher.py" --clear-status
         # Compose run creates setup containers outside the desktop service lifecycle.
         one_offs=$(docker ps --quiet \
             --filter label=com.docker.compose.project=innervoice-desktop \

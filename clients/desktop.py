@@ -21,6 +21,7 @@ import wave
 
 import requests
 
+from desktop_icons import APP_ID, icon_path
 from recording_storage import audio_bytes, audio_fragments, limit_bytes, recordings
 from provider import Client, atomic, gateway_url, read_bearer
 
@@ -540,8 +541,9 @@ def graphical(listener):
     pointer=HOME/"current"
     app = QApplication([])
     app.setApplicationName("InnerVoice")
-    app.setDesktopFileName("io.github.arkano1dev.InnerVoice")
-    app_icon = QIcon(str(Path(__file__).with_name("assets") / "innervoice.png"))
+    app.setApplicationDisplayName("InnerVoice")
+    app.setDesktopFileName(APP_ID)
+    app_icon = QIcon(str(icon_path()))
     app.setWindowIcon(app_icon)
     app.setQuitOnLastWindowClosed(False)
     class RecorderWindow(QWidget):
@@ -709,16 +711,10 @@ def graphical(listener):
 
     def indicator(phase):
         status.setStyleSheet("color:" + {"Recording":"#ffa0aa", "Processing":"#edc280", "Ready":"#a2d9c7"}.get(phase, "#cac5df"))
-        pix = app_icon.pixmap(32, 32)
-        painter = QPainter(pix)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor({"Recording":"#ff354e", "Processing":"#efbe67"}.get(phase, "#75d9cf")))
-        painter.drawEllipse(21, 21, 8, 8)
-        painter.end()
-        icon = QIcon(pix)
+        icon = QIcon(str(icon_path(phase)))
+        root.setWindowIcon(icon)
         tray.setIcon(icon)
-        tray.setToolTip("InnerVoice · " + phase)
+        tray.setToolTip("InnerVoice")
         atomic(HOME/"indicator", phase.encode())
 
     indicator("Ready")
