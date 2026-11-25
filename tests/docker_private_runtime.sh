@@ -119,7 +119,31 @@ for svc in gateway whisper bot; do
 done
 "${stack[@]}" exec -T bot python - <<'PY'
 import asyncio, socket
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 import bot
+
+
+async def check_voice_download():
+    voice = SimpleNamespace(file_id="fixture-voice", file_size=5, duration=1)
+    message = SimpleNamespace(from_user=SimpleNamespace(id=bot.AUTHORIZED_USER), voice=voice)
+
+    async def download(_voice, *, destination, seek, timeout):
+        assert not seek
+        assert destination.write(b"voice") == 5
+        destination.flush()
+
+    with patch.object(bot.bot, "download", download):
+        await bot.handle_voice(message)
+    _, file_id, path, _, _ = bot.audio_queue.get_nowait()
+    note = Path(path)
+    try:
+        assert file_id == voice.file_id and note.read_bytes() == b"voice"
+    finally:
+        note.unlink()
+
+
 async def check():
     async with bot.gateway_session() as session:
         async with session.get("http://localhost/health", headers={"Authorization":"invalid"}) as result:
@@ -131,7 +155,7 @@ async def check():
     bot.overrides.clear()
     await bot.sync_preferences()
     assert bot.preferences(bot.AUTHORIZED_USER)["language"] == "en"
-    from types import SimpleNamespace
+    await check_voice_download()
     for uid, chat_type, expected in ((bot.AUTHORIZED_USER,"private",True), (bot.AUTHORIZED_USER+1,"private",False), (bot.AUTHORIZED_USER,"group",False)):
         event = SimpleNamespace(from_user=SimpleNamespace(id=uid), chat=SimpleNamespace(type=chat_type))
         permitted, _ = await bot.dp.message.check_root_filters(event)

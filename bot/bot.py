@@ -632,6 +632,9 @@ async def handle_voice(message: types.Message):
                     raise ValueError("Voice note exceeds byte limit")
                 return stream.write(block)
 
+            def flush(self):
+                stream.flush()
+
         with path.open("xb") as stream:
             await bot.download(message.voice, destination=LimitedWriter(), seek=False, timeout=60)
         business = getattr(message, "business_connection_id", None)
