@@ -524,11 +524,11 @@ def run_graphical():
 
 def graphical(listener):
     if os.environ.get('IV_DESKTOP_QT') == '6':
-        from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint
+        from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QEvent
         from PySide6.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
         from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
     else:
-        from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint
+        from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QEvent
         from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
         from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
 
@@ -546,18 +546,30 @@ def graphical(listener):
     app.setQuitOnLastWindowClosed(False)
     class RecorderWindow(QWidget):
         def closeEvent(self, event):
-            # Keep shortcut capture available through a normal task-switcher window.
+            # Close the editor surface while the recorder and shortcut keep running.
             event.ignore()
-            self.showMinimized()
+            self.hide()
 
-    root = RecorderWindow(None, Qt.Window)
+        def mousePressEvent(self, event):
+            if event.button() == Qt.LeftButton and self.windowHandle().startSystemMove():
+                event.accept()
+                return
+            super().mousePressEvent(event)
+
+        def event(self, event):
+            result = super().event(event)
+            if event.type() in (QEvent.LayoutRequest, QEvent.Show) and hasattr(self, "fit_timer"):
+                self.fit_timer.start()
+            return result
+
+    root = RecorderWindow(None, Qt.Window | Qt.FramelessWindowHint)
     root.setObjectName("recorderWindow")
     root.setAttribute(Qt.WA_TranslucentBackground)
     root.setWindowTitle("InnerVoice")
     root.setWindowIcon(app_icon)
     root.setStyleSheet("""
         QWidget#recorderWindow {background:transparent}
-        QWidget#pill {background:rgba(26,27,34,237);border:1px solid rgba(148,151,170,95);border-radius:14px}
+        QWidget#pill {background:rgba(26,27,34,237);border:1px solid rgba(148,151,170,95);border-radius:20px}
         QLabel {color:#bfbfc7;font-size:12px;background:transparent}
         QTextEdit {background:transparent;color:#e3e3e7;border:0;padding:0;font-size:15px;
                    selection-background-color:#535065}
@@ -570,6 +582,8 @@ def graphical(listener):
         QPushButton:hover, QPushButton:focus {background:#393940;border-color:#64646d}
         QPushButton:pressed {background:#494550}
         QPushButton:focus {border:1px solid #c9b8ff}
+        QPushButton#windowControl {color:#bfbfc7;border-radius:10px;font-size:15px}
+        QPushButton#windowControl:hover {color:#ffffff;background:#41424a}
         QPushButton#task {background:#36323e;color:#e2d9f5;font-weight:bold;border-radius:10px}
         QPushButton#task:hover, QPushButton#task:focus {border-color:#b7a4d5}
         QPushButton#record {background:#35353d;border-color:#54545e}
@@ -589,7 +603,7 @@ def graphical(listener):
     sheet.setAttribute(Qt.WA_StyledBackground)
     outer.addWidget(sheet)
     body = QVBoxLayout(sheet)
-    body.setContentsMargins(14, 10, 14, 10)
+    body.setContentsMargins(10, 6, 10, 6)
     body.setSpacing(5)
     editor = QTextEdit()
     editor.setAcceptRichText(False)
@@ -608,7 +622,12 @@ def graphical(listener):
     buttons.setContentsMargins(0, 0, 0, 0)
     buttons.setSpacing(4)
     body.addWidget(footer)
-    status = QLabel("")
+    class RecorderStatus(QLabel):
+        def setText(self, text):
+            super().setText(text)
+            self.setVisible(bool(text))
+
+    status = RecorderStatus("")
     status.setAlignment(Qt.AlignCenter)
     status.setWordWrap(True)
     status.setMaximumHeight(status.fontMetrics().lineSpacing() * 3)
@@ -758,6 +777,7 @@ def graphical(listener):
     editor.textChanged.connect(edited)
 
     def revise(raw, final=False):
+        root.fit_timer.start()
         old = state.get("text", "")
         boundary = state.get("draft_start", len(old))
         prefix = old[:boundary]
@@ -1054,6 +1074,30 @@ def graphical(listener):
     task_button.setObjectName("task")
     task_button.setFixedSize(40, 30)
     buttons.addWidget(task_button)
+    expanded = False
+
+    def toggle_size():
+        nonlocal expanded
+        expanded = not expanded
+        label = "Restore automatic size" if expanded else "Expand editor"
+        expand_button.setText("▣" if expanded else "□")
+        expand_button.setToolTip(label)
+        expand_button.setAccessibleName(label)
+        fit_pill()
+
+    def window_control(symbol, name, action):
+        button = QPushButton(symbol)
+        button.setObjectName("windowControl")
+        button.setAccessibleName(name)
+        button.setToolTip(name)
+        button.setFixedSize(22, 24)
+        button.clicked.connect(action)
+        buttons.addWidget(button)
+        return button
+
+    window_control("−", "Minimize", root.showMinimized)
+    expand_button = window_control("□", "Expand editor", toggle_size)
+    window_control("×", "Close editor", root.close)
     for button in (pause_button, play_button, retry_button):
         button.hide()
 
@@ -1176,11 +1220,44 @@ def graphical(listener):
         timer.timeout.connect(lambda: read_shortcuts(listener, events))
     screen = app.screenAt(QCursor.pos()) or app.primaryScreen()
     area = screen.availableGeometry()
-    # Size once. Text growth belongs to the scroll area, including on Wayland
-    # where the compositor owns window placement.
-    root.resize(min(520, area.width()), min(280, max(140, area.height() - 80)))
+    def fit_pill():
+        if root.isMinimized():
+            return
+        available = (root.screen() or screen).availableGeometry()
+        max_width = min(520, available.width())
+        max_height = min(280, available.height())
+        document = editor.document()
+        length = document.characterCount() - 1
+        editor.setVisible(bool(length or working or expanded or directory))
+        status.setVisible(bool(status.text()))
+        margins = body.contentsMargins()
+        padding = margins.left() + margins.right()
+        width = max_width if expanded else min(max_width, max(
+            footer.minimumSizeHint().width() + padding, 264 + min(256, length * 2)))
+        body.activate()
+        desired = margins.top() + margins.bottom() + footer.sizeHint().height()
+        if not status.isHidden():
+            desired += body.spacing() + min(status.maximumHeight(), max(status.fontMetrics().height(),
+                                           status.heightForWidth(max(1, width - padding))))
+        if not editor.isHidden():
+            desired += body.spacing() + max(editor.minimumHeight(), int(document.size().height()) + 8)
+        height = max_height if expanded else min(max_height, desired)
+        if root.width() != width or root.height() != height:
+            root.resize(width, height)
+            # Wayland places top-level surfaces. Other backends allow us to
+            # keep the growing pill inside the current monitor's work area.
+            if root.isVisible() and not wayland:
+                root.move(max(available.left(), min(root.x(), available.right()-width+1)),
+                          max(available.top(), min(root.y(), available.bottom()-height+1)))
+
+    root.fit_timer = QTimer(root)
+    root.fit_timer.setSingleShot(True)
+    root.fit_timer.timeout.connect(fit_pill)
+    editor.document().documentLayout().documentSizeChanged.connect(lambda _: root.fit_timer.start())
+    fit_pill()
     root.move(area.center().x() - root.width() // 2, area.center().y() - root.height() // 2)
     root.show()
+    root.windowHandle().screenChanged.connect(lambda _: root.fit_timer.start())
     try:
         if os.environ.get("IV_DESKTOP_QT") == "6":
             app.exec()

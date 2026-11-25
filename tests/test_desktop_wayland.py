@@ -320,7 +320,9 @@ class WaylandDesktopTests(unittest.TestCase):
                 for widget in app.topLevelWidgets():
                     editor = widget.findChild(QtWidgets.QTextEdit)
                     if editor is not None and "startup" not in observed:
-                        observed["startup"] = (widget.isVisible() and not editor.toPlainText()
+                        observed["startup"] = (widget.isVisible() and widget.height() <= 64
+                                               and bool(widget.windowFlags() & QtCore.Qt.FramelessWindowHint)
+                                               and not editor.toPlainText()
                                                and editor.placeholderText() == "Ready when you are")
                         observed["ordinary"] = (
                             widget.windowType() == QtCore.Qt.Window
@@ -350,18 +352,27 @@ class WaylandDesktopTests(unittest.TestCase):
                         observed["after_auto"] = widget.isVisible() and not widget.isMinimized()
                         glyph = copy.findChild(QtWidgets.QLabel, "glyph")
                         observed["centered"] = (glyph.geometry().center() - copy.rect().center()).manhattanLength() <= 2
+                        def control(name):
+                            return next(b for b in widget.findChildren(QtWidgets.QPushButton)
+                                        if b.accessibleName() == name)
                         normal_size = widget.size()
-                        widget.showMinimized()
+                        control("Expand editor").click()
+                        app.processEvents()
+                        expanded_size = widget.size()
+                        control("Restore automatic size").click()
+                        app.processEvents()
+                        observed["maximized"] = (expanded_size.width() == 520 and expanded_size.height() == 280
+                                                  and widget.height() == normal_size.height())
+                        control("Minimize").click()
+                        observed["minimized"] = widget.isMinimized()
                         editor.setPlainText("Long dictation with wrapping. " * 400)
                         widget.showNormal()
-                        app.processEvents()
-                        app.processEvents()
-                        observed["bounded"] = widget.size() == normal_size and editor.verticalScrollBar().maximum() > 0
-                        widget.showMaximized()
-                        app.processEvents()
-                        observed["maximized"] = (widget.isMaximized() and
-                            widget.rect().contains(copy.mapTo(widget, copy.rect().bottomRight())))
-                        widget.showNormal()
+                        for _ in range(5):
+                            app.processEvents()
+                        observed["bounded"] = widget.size() == expanded_size and editor.verticalScrollBar().maximum() > 0
+                        control("Close editor").click()
+                        observed["closed"] = not widget.isVisible()
+                        widget.show()
                         app.processEvents()
                         observed["separate"] = (
                             editor.mapTo(widget, editor.rect().bottomLeft()).y()
@@ -426,6 +437,8 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertTrue(observed["centered"])
             self.assertTrue(observed["bounded"])
             self.assertTrue(observed["maximized"])
+            self.assertTrue(observed["minimized"])
+            self.assertTrue(observed["closed"])
             saved = attempts[-1]
             self.assertTrue((saved / "000.raw").is_file())
             record = json.loads((saved / "editor.json").read_text())
