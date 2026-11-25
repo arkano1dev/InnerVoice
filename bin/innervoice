@@ -379,7 +379,7 @@ def env(cfg):
                 IV_REVISION=hashlib.sha256(json.dumps([p,d["engine"],cfg["validation"],"decoder-v1"],sort_keys=True).encode()).hexdigest())
 
 
-def compose(cfg,*args,capture=False,allowed_networks=None):
+def compose(cfg,*args,capture=False,allowed_networks=None,timeout=None):
     files = ["-f","docker-compose.yml","-f","compose.private.yml"]
     if cfg["deployment"].get("telegram"):
         files += ["-f","compose.telegram.yml"]
@@ -399,7 +399,22 @@ def compose(cfg,*args,capture=False,allowed_networks=None):
                 raise ValueError(f"Expected a GPU character device with a dedicated non-root group at {node}")
             environment["WHISPER_RENDER_GROUP"] = str(device_stat.st_gid)
     return subprocess.run([*command, *args], cwd=REPO, env=environment, check=True,
-                          capture_output=capture, text=True)
+                          capture_output=capture, text=True, timeout=timeout)
+
+
+def verify_worker_gpu(cfg):
+    # Run outside Gunicorn so a native runtime crash cannot kill its worker.
+    probe = "import torch; assert torch.ones(8, device='cuda').tolist() == [1.0] * 8"
+    try:
+        compose(cfg, "exec", "-T", "whisper", "python", "-X", "faulthandler", "-c", probe,
+                timeout=30)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise ValueError(
+            "Whisper detected a GPU but could not execute a small tensor test. "
+            "Check the worker image and ROCm settings. If the previous deployment used "
+            "HSA_OVERRIDE_GFX_VERSION, restore its known-good value in the private .env. "
+            "See docs/private-gateway.md#check-rocm-compatibility-with-the-previous-deployment."
+        ) from error
 
 
 def stop_deployment(cfg):
@@ -723,17 +738,23 @@ def operate(args):
     for _ in range(30):
         try:
             if compose(cfg,"exec","-T","gateway","python","-c",probe,capture=True).stdout.strip()==expected:
-                atomic(ACTIVE,serialize(cfg))
-                atomic(FILE,serialize(cfg))
-                d = cfg["deployment"]
-                print(f"Gateway ready at https://{d['bind']}:{d['port']}.")
-                print("Send a short test audio to verify inference.")
-                return
+                break
         except subprocess.CalledProcessError:
             pass
         time.sleep(2)
-    compose(cfg,"stop")
-    raise ValueError("Activation failed. Inspect 'docker compose logs --tail=80 gateway whisper'. Restore the previous settings before retrying.")
+    else:
+        compose(cfg,"stop")
+        raise ValueError("Activation failed. Inspect 'docker compose logs --tail=80 gateway whisper'. Restore the previous settings before retrying.")
+    try:
+        verify_worker_gpu(cfg)
+    except ValueError:
+        compose(cfg, "stop")
+        raise
+    atomic(ACTIVE,serialize(cfg))
+    atomic(FILE,serialize(cfg))
+    d = cfg["deployment"]
+    print(f"Gateway ready at https://{d['bind']}:{d['port']}.")
+    print("Send a short test audio to verify inference.")
 
 
 def main():

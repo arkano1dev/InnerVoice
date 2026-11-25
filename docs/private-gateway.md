@@ -12,7 +12,7 @@ Provision a trusted local multilingual checkpoint and a compatible worker image 
 docker build --build-arg ROCM_BASE="$ROCM_BASE" -t innervoice-worker:candidate whisper
 ```
 
-Set `ROCM_BASE` to the approved base image reference by digest. Put any host-specific runtime override in the protected Compose environment. Keep a protected repository-root `.env` only when enabling the standalone Telegram bot. See [server audio and Telegram](#server-audio-and-telegram).
+Set `ROCM_BASE` to the approved base image reference by digest. Keep any host-specific runtime overrides and standalone bot credentials in the protected repository-root `.env`. See [ROCm compatibility checks](#check-rocm-compatibility-with-the-previous-deployment) and [server audio and Telegram](#server-audio-and-telegram).
 
 Run the guided setup from the repository root:
 
@@ -51,11 +51,9 @@ First activation replaces the old port mapping. Schedule it after recording the 
 
 ## Check ROCm compatibility with the previous deployment
 
-A GPU reported by `/gpu-check` can still fail when PyTorch first allocates or
-runs on it. If Gunicorn replaces a worker with exit status 139, reproduce the
-failure with a small tensor before testing audio. If the previous deployment
-used a graphics target override, supply its effective
-`HSA_OVERRIDE_GFX_VERSION` in the operator shell or protected `.env`. The private launcher resolves the default `render` group to the host render node’s numeric GID before starting Whisper.
+The CLI runs a small PyTorch tensor computation in the running Whisper container before it reports the Gateway ready. This checks GPU execution with the selected image, device mapping and environment. Send a short recording after startup to check model loading and transcription.
+
+If the tensor test fails or Gunicorn replaces a worker with exit status 139, compare the effective runtime settings with the last working deployment. If that deployment used `HSA_OVERRIDE_GFX_VERSION`, restore its verified value in the server's protected `.env` and restart. Keep the value private and specific to the host. The private launcher resolves the default `render` group to the host render node's numeric GID before starting Whisper.
 
 For a Docker-only bot smoke test with the previous runtime settings, add
 `compose.rocm-compat.yml` explicitly. This overlay disables seccomp filtering for
