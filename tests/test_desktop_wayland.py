@@ -21,6 +21,17 @@ import desktop
 
 
 class WaylandDesktopTests(unittest.TestCase):
+    def test_user_corrections_survive_preview_and_final_revisions(self):
+        raw = "Meet Ana at noon"
+        edited = "Meet Anna at noon"
+        next_raw = "Meet Ana at noon tomorrow"
+        merged = desktop.revised_draft(raw, edited, next_raw)
+        self.assertEqual(merged, "Meet Anna at noon tomorrow")
+        self.assertEqual(desktop.revised_draft(next_raw, merged, "Meet Ana at noon tomorrow."),
+                         "Meet Anna at noon tomorrow.")
+        self.assertEqual(desktop.revised_draft("Call Ana", "Call Ángela", "Call Ana tomorrow"),
+                         "Call Ángela tomorrow")
+
     def test_desktop_build_context_includes_copy_sources(self):
         clients = ROOT / "clients"
         rules = (clients / "Dockerfile.desktop.dockerignore").read_text().splitlines()
@@ -247,7 +258,10 @@ class WaylandDesktopTests(unittest.TestCase):
 
     @unittest.skipUnless(importlib.util.find_spec("PyQt5"), "PyQt5 is required for the editor test")
     def test_editor_records_and_stops_from_shortcuts_then_copies_result(self):
-        from PyQt5 import QtCore, QtWidgets
+        if os.environ.get("IV_DESKTOP_QT") == "6":
+            from PySide6 import QtCore, QtWidgets
+        else:
+            from PyQt5 import QtCore, QtWidgets
 
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -278,10 +292,13 @@ class WaylandDesktopTests(unittest.TestCase):
                 stop.wait(2)
                 events.put(("stopped", None))
 
+            user_edited = threading.Event()
             attempts = []
             def network(_, directory, ___, events, finished):
                 attempts.append(directory)
                 events.put(("preview", (0, "Draft words")))
+                if len(attempts) == 1 and user_edited.wait(1):
+                    events.put(("preview", (0, "Draft words continued")))
                 if finished.wait(2):
                     if len(attempts) == 1:
                         events.put(("retry", ("Synthetic gateway failure", True)))
@@ -310,7 +327,13 @@ class WaylandDesktopTests(unittest.TestCase):
                             and not widget.windowFlags() & QtCore.Qt.WindowStaysOnTopHint
                         )
                     if editor is not None and editor.toPlainText() == "Draft words":
-                        observed["inline"] = editor.isReadOnly()
+                        observed["inline"] = not editor.isReadOnly()
+                        if not user_edited.is_set():
+                            editor.selectAll()
+                            editor.insertPlainText("Correct words")
+                            user_edited.set()
+                    if editor is not None and editor.toPlainText() == "Correct words continued":
+                        observed["corrected"] = True
                     if editor is not None and not observed.get("retried"):
                         labels = [label.text() for label in widget.findChildren(QtWidgets.QLabel)]
                         if "Synthetic gateway failure" in labels:
@@ -325,10 +348,20 @@ class WaylandDesktopTests(unittest.TestCase):
                     app.sendEvent(editor.viewport(), QtCore.QEvent(QtCore.QEvent.Enter))
                     def check_after_copy_delay():
                         observed["after_auto"] = widget.isVisible() and not widget.isMinimized()
+                        glyph = copy.findChild(QtWidgets.QLabel, "glyph")
+                        observed["centered"] = (glyph.geometry().center() - copy.rect().center()).manhattanLength() <= 2
+                        normal_size = widget.size()
                         widget.showMinimized()
                         editor.setPlainText("Long dictation with wrapping. " * 400)
                         widget.showNormal()
                         app.processEvents()
+                        app.processEvents()
+                        observed["bounded"] = widget.size() == normal_size and editor.verticalScrollBar().maximum() > 0
+                        widget.showMaximized()
+                        app.processEvents()
+                        observed["maximized"] = (widget.isMaximized() and
+                            widget.rect().contains(copy.mapTo(widget, copy.rect().bottomRight())))
+                        widget.showNormal()
                         app.processEvents()
                         observed["separate"] = (
                             editor.mapTo(widget, editor.rect().bottomLeft()).y()
@@ -358,7 +391,7 @@ class WaylandDesktopTests(unittest.TestCase):
                                 b.isVisible() and b.accessibleName() == "Play recording"
                                 for b in widget.findChildren(QtWidgets.QPushButton)
                             )
-                        app.quit()
+                        app.exit(0)
                     QtCore.QTimer.singleShot(2500, check_after_copy_delay)
                     return
                 QtCore.QTimer.singleShot(30, inspect_editor)
@@ -367,7 +400,7 @@ class WaylandDesktopTests(unittest.TestCase):
             with patch.dict(os.environ, env):
                 app = QtWidgets.QApplication([])
                 QtCore.QTimer.singleShot(30, inspect_editor)
-                QtCore.QTimer.singleShot(11000, app.quit)
+                QtCore.QTimer.singleShot(11000, lambda: app.exit(0))
                 with (
                     patch.object(QtWidgets, "QApplication", return_value=app),
                     patch.object(desktop, "HOME", home),
@@ -389,6 +422,10 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertTrue(observed["separate"])
             self.assertEqual(observed["live"], "0")
             self.assertTrue(observed["inline"])
+            self.assertTrue(observed.get("corrected"))
+            self.assertTrue(observed["centered"])
+            self.assertTrue(observed["bounded"])
+            self.assertTrue(observed["maximized"])
             saved = attempts[-1]
             self.assertTrue((saved / "000.raw").is_file())
             record = json.loads((saved / "editor.json").read_text())

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Ubuntu graphical client. Capture, network, and UI use independent threads."""
+from difflib import SequenceMatcher
+import re
 import fcntl
 import getpass
 import io
@@ -48,6 +50,40 @@ def delivery_intervals(cfg):
     if type(ui) is not int or not 100 <= ui <= 700:
         ui = 700
     return poll, ui
+
+
+def revised_draft(original, edited, incoming):
+    """Carry user word corrections into the recognizer's next version of this window."""
+    if edited == original or incoming == edited:
+        return incoming
+    if original == incoming:
+        return edited
+    split = lambda text: re.findall(r"\s+|[^\s]+", text)
+    base, user, new = map(split, (original, edited, incoming))
+    # Project old token boundaries onto the new preview. At a shared boundary,
+    # keep new recognizer insertions outside the span of a manual replacement.
+    left, right = {}, {}
+    for _, a, b, c, d in SequenceMatcher(None, base, new, autojunk=False).get_opcodes():
+        for i in range(a, b + 1):
+            point = c + (i-a)*(d-c)//(b-a) if b != a else c
+            left.setdefault(i, point)
+            right[i] = d if i == b else point
+    for op, a, b, c, d in reversed(SequenceMatcher(None, base, user, autojunk=False).get_opcodes()):
+        if op != "equal":
+            start = left.get(a, 0) if a == b else right[a]
+            new[start:max(start, left.get(b, start))] = user[c:d]
+    return "".join(new)
+
+
+def changed_span(old, new):
+    start = 0
+    while start < min(len(old), len(new)) and old[start] == new[start]:
+        start += 1
+    a, b = len(old), len(new)
+    while a > start and b > start and old[a-1] == new[b-1]:
+        a -= 1
+        b -= 1
+    return start, a, b
 
 
 def capture_options(state):
@@ -488,12 +524,12 @@ def run_graphical():
 
 def graphical(listener):
     if os.environ.get('IV_DESKTOP_QT') == '6':
-        from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QSize
-        from PySide6.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor, QPainterPath, QRegion
+        from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint
+        from PySide6.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
         from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
     else:
-        from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QSize
-        from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor, QPainterPath, QRegion
+        from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint
+        from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
         from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
 
     cfg = json.loads(CONFIG.read_bytes())
@@ -514,36 +550,14 @@ def graphical(listener):
             event.ignore()
             self.showMinimized()
 
-        def showEvent(self, event):
-            super().showEvent(event)
-            QTimer.singleShot(0, restore_layout)
-
-        def resizeEvent(self, event):
-            super().resizeEvent(event)
-            outline = QPainterPath()
-            outline.addRoundedRect(0., 0., float(self.width()), float(self.height()), 20., 20.)
-            self.setMask(QRegion(outline.toFillPolygon().toPolygon()))
-            if wayland or not self.isVisible() or self.isMinimized():
-                return
-            area = self.screen().availableGeometry()
-            frame = self.frameGeometry()
-            if frame.bottom() > area.bottom():
-                self.move(self.x(), max(area.top(), area.bottom() - frame.height() + 1))
-
-        def mousePressEvent(self, event):
-            if event.button() == Qt.LeftButton and self.windowHandle().startSystemMove():
-                event.accept()
-                return
-            super().mousePressEvent(event)
-
-    root = RecorderWindow(None, Qt.Window | Qt.FramelessWindowHint)
+    root = RecorderWindow(None, Qt.Window)
     root.setObjectName("recorderWindow")
     root.setAttribute(Qt.WA_TranslucentBackground)
     root.setWindowTitle("InnerVoice")
     root.setWindowIcon(app_icon)
     root.setStyleSheet("""
         QWidget#recorderWindow {background:transparent}
-        QWidget#pill {background:#19191d;border:1px solid #47474e;border-radius:20px}
+        QWidget#pill {background:rgba(26,27,34,237);border:1px solid rgba(148,151,170,95);border-radius:14px}
         QLabel {color:#bfbfc7;font-size:12px;background:transparent}
         QTextEdit {background:transparent;color:#e3e3e7;border:0;padding:0;font-size:15px;
                    selection-background-color:#535065}
@@ -552,7 +566,7 @@ def graphical(listener):
         QScrollBar::handle:vertical:hover {background:#a2a2ad}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {height:0}
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {background:transparent}
-        QPushButton {border:1px solid transparent;border-radius:15px;background:transparent}
+        QPushButton {padding:0;margin:0;text-align:center;border:1px solid transparent;border-radius:15px;background:transparent}
         QPushButton:hover, QPushButton:focus {background:#393940;border-color:#64646d}
         QPushButton:pressed {background:#494550}
         QPushButton:focus {border:1px solid #c9b8ff}
@@ -572,7 +586,7 @@ def graphical(listener):
     outer.setContentsMargins(0, 0, 0, 0)
     sheet = QWidget()
     sheet.setObjectName("pill")
-    sheet.setFixedWidth(min(424, app.primaryScreen().availableGeometry().width()))
+    sheet.setAttribute(Qt.WA_StyledBackground)
     outer.addWidget(sheet)
     body = QVBoxLayout(sheet)
     body.setContentsMargins(14, 10, 14, 10)
@@ -586,33 +600,9 @@ def graphical(listener):
     palette.setColor(QPalette.PlaceholderText, QColor("#aaaab4"))
     editor.setPalette(palette)
     editor.document().setDocumentMargin(2)
-    editor.setFixedHeight(24)
-    body.addWidget(editor)
-    def fit_text(*_):
-        if root.isMinimized():
-            return
-        height = int(editor.document().size().height()) + 3
-        screen = root.screen() or app.primaryScreen()
-        available = screen.availableGeometry().height()
-        controls = max(36, footer.sizeHint().height(), footer.heightForWidth(sheet.width() - 28))
-        ceiling = max(24, available - controls - 16 - 2 - 48)
-        editor.setFixedHeight(max(24, min(height, ceiling)))
-        policy = Qt.ScrollBarAsNeeded if height > ceiling else Qt.ScrollBarAlwaysOff
-        if editor.verticalScrollBarPolicy() != policy:
-            editor.setVerticalScrollBarPolicy(policy)
-
-    def restore_layout():
-        if root.isMinimized():
-            return
-        body.invalidate()
-        body.activate()
-        fit_text()
-        outer.activate()
-        root.adjustSize()
-        sheet.update()
-        editor.viewport().update()
-
-    outer.setSizeConstraint(QVBoxLayout.SetFixedSize)
+    editor.setMinimumSize(40, 36)
+    editor.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    body.addWidget(editor, 1)
     footer = QWidget(sheet)
     buttons = QHBoxLayout(footer)
     buttons.setContentsMargins(0, 0, 0, 0)
@@ -621,7 +611,9 @@ def graphical(listener):
     status = QLabel("")
     status.setAlignment(Qt.AlignCenter)
     status.setWordWrap(True)
-    status.setMinimumWidth(55)
+    status.setMaximumHeight(status.fontMetrics().lineSpacing() * 3)
+    status.setMinimumWidth(0)
+    body.insertWidget(1, status)
     elapsed = QLabel()
     meter = QProgressBar()
     meter.setTextVisible(False)
@@ -634,7 +626,15 @@ def graphical(listener):
     def icon_button(name, symbol):
         button = QPushButton()
         button.setFixedSize(36, 36)
-        button.setIconSize(QSize(20, 20))
+        glyph = QLabel(button)
+        glyph.setObjectName("glyph")
+        glyph.setFixedSize(20, 20)
+        glyph.setScaledContents(True)
+        glyph.setAttribute(Qt.WA_TransparentForMouseEvents)
+        layout = QHBoxLayout(button)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(glyph, 0, Qt.AlignCenter)
+        button.setAutoDefault(False)
         set_icon(button, name, symbol)
         return button
 
@@ -673,7 +673,7 @@ def graphical(listener):
             else:
                 painter.drawRoundedRect(6, 6, 12, 12, 2, 2)
         painter.end()
-        button.setIcon(QIcon(pix))
+        button.findChild(QLabel, "glyph").setPixmap(pix)
         button.setAccessibleName(name)
         button.setToolTip(name)
 
@@ -737,27 +737,61 @@ def graphical(listener):
 
     def save():
         if directory:
-            if not editor.isReadOnly():
-                state["text"] = editor.toPlainText()
             try:
                 atomic(directory / "editor.json", json.dumps(state).encode())
             except OSError as error:
                 status.setText(f"Could not save transcript: {error}")
 
-    editor.textChanged.connect(save)
+    def edited():
+        if not directory:
+            return
+        old = state.get("text", "")
+        text = editor.toPlainText()
+        if "draft_start" in state:
+            start, end, new_end = changed_span(old, text)
+            boundary = state["draft_start"]
+            if start < boundary:
+                state["draft_start"] = boundary + new_end - end if end <= boundary else start
+        state["text"] = text
+        save()
 
-    def render_live(preview=""):
-        confirmed = state.get("text", "")
-        with QSignalBlocker(editor):
-            editor.setPlainText(" ".join(part for part in (confirmed, preview) if part))
-            editor.moveCursor(QTextCursor.End)
+    editor.textChanged.connect(edited)
+
+    def revise(raw, final=False):
+        old = state.get("text", "")
+        boundary = state.get("draft_start", len(old))
+        prefix = old[:boundary]
+        incoming = (" " if prefix and raw and not prefix[-1].isspace() else "") + raw
+        revised = revised_draft(state.get("draft_raw", ""), old[boundary:], incoming)
+        text = prefix + revised
+        if text != old:
+            start, end, new_end = changed_span(old[boundary:], revised)
+            start, end, new_end = start+boundary, end+boundary, new_end+boundary
+            # QTextCursor offsets count UTF-16 code units.
+            position = lambda i: len(old[:i].encode("utf-16-le")) // 2
+            bar = editor.verticalScrollBar()
+            scroll = bar.value()
+            follow = scroll >= bar.maximum()-1 and not editor.textCursor().hasSelection()
+            with QSignalBlocker(editor):
+                patch = QTextCursor(editor.document())
+                patch.setPosition(position(start))
+                patch.setPosition(position(end), QTextCursor.KeepAnchor)
+                patch.insertText(text[start:new_end])
+            bar.setValue(bar.maximum() if follow else scroll)
+        state["text"] = text
+        if final:
+            state.pop("draft_raw", None)
+            state.pop("draft_start", None)
+        else:
+            state.update(draft_raw=incoming, draft_start=boundary)
+        save()
 
     def transfer():
         nonlocal transfer_active, current_transfer
         state.pop("sync_error", None)
         current_transfer = TransferEvents(events)
         transfer_active = True
-        editor.setReadOnly(state.get("streaming") is True or bool(state.get("reprocess_key")))
+        editor.setReadOnly(bool(state.get("reprocess_key")))
         retry_button.hide()
         key = state.get("reprocess_key") or state.get("session_key", directory.name)
         threading.Thread(target=network, args=(cfg, directory, key, current_transfer, finished), daemon=True).start()
@@ -854,8 +888,8 @@ def graphical(listener):
                 timing["voice"] = value
             elif kind == "preview":
                 confirmed, preview = value
-                render_live(preview if confirmed >= state["applied"] else "")
-                fit_text()
+                if confirmed == state["applied"] and preview:
+                    revise(preview)
                 first_visible()
             elif kind == "paused":
                 if not stop.is_set():
@@ -896,21 +930,12 @@ def graphical(listener):
             elif kind=="segments":
                 for part in value:
                     if part["index"]==state["applied"]:
-                        if editor.isReadOnly():
-                            state["text"] = " ".join(filter(None, (state.get("text", ""), part["text"])))
-                            render_live()
-                        elif part["text"]:
-                            with QSignalBlocker(editor):
-                                tail = QTextCursor(editor.document())
-                                tail.movePosition(QTextCursor.End)
-                                tail.insertText((" " if editor.toPlainText() else "") + part["text"])
-                        state["applied"]+=1
-                        save()
+                        state["applied"] += 1
+                        revise(part["text"], final=True)
                 first_visible()
             elif kind=="retry":
                 transfer_active = False
                 if editor.isReadOnly():
-                    render_live()
                     editor.setReadOnly(False)
                 message, replace_session = value
                 state["sync_error"] = message
@@ -925,6 +950,8 @@ def graphical(listener):
                 state["text"] = " ".join(part["text"] for part in value if part["text"])
                 state["applied"] = len(value)
                 state.pop("reprocess_key", None)
+                state.pop("draft_raw", None)
+                state.pop("draft_start", None)
                 with QSignalBlocker(editor):
                     editor.setPlainText(state["text"])
                 save()
@@ -932,9 +959,7 @@ def graphical(listener):
                 transfer_active = False
                 working=False
                 if editor.isReadOnly():
-                    render_live()
                     editor.setReadOnly(False)
-                fit_text()
                 state["ready"]=True
                 save()
                 status.setText(value)
@@ -1020,7 +1045,7 @@ def graphical(listener):
     copy_button.clicked.connect(copy_result)
     for button in (start_button, pause_button, play_button, retry_button):
         buttons.addWidget(button)
-    buttons.addWidget(status, 1)
+    buttons.addStretch(1)
     buttons.addWidget(meter)
     buttons.addWidget(elapsed)
     buttons.addWidget(copy_button)
@@ -1149,27 +1174,13 @@ def graphical(listener):
         notifier.activated.connect(lambda *_: (read_shortcuts(listener, events), poll()))
     else:
         timer.timeout.connect(lambda: read_shortcuts(listener, events))
-    editor.document().documentLayout().documentSizeChanged.connect(lambda _: fit_text())
-    root.adjustSize()
     screen = app.screenAt(QCursor.pos()) or app.primaryScreen()
-    if screen:
-        area = screen.availableGeometry()
-        root.move(area.center().x() - root.width() // 2, area.bottom() - root.height() - 24)
+    area = screen.availableGeometry()
+    # Size once. Text growth belongs to the scroll area, including on Wayland
+    # where the compositor owns window placement.
+    root.resize(min(520, area.width()), min(280, max(140, area.height() - 80)))
+    root.move(area.center().x() - root.width() // 2, area.center().y() - root.height() // 2)
     root.show()
-    watched_screen = root.screen()
-
-    def screen_changed(screen):
-        nonlocal watched_screen
-        if watched_screen is not None:
-            watched_screen.availableGeometryChanged.disconnect(fit_text)
-        watched_screen = screen
-        if screen is not None:
-            screen.availableGeometryChanged.connect(fit_text)
-            fit_text()
-
-    watched_screen.availableGeometryChanged.connect(fit_text)
-    root.windowHandle().screenChanged.connect(screen_changed)
-    fit_text()
     try:
         if os.environ.get("IV_DESKTOP_QT") == "6":
             app.exec()
