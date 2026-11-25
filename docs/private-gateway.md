@@ -114,11 +114,19 @@ Run commands from the repository root. Deployment edits apply on activation. Rot
 | `credential --identity LABEL` | Register or rotate a token at a masked prompt. Use a distinct random token for each client. |
 | `start [--setup] [--engine ENGINE]` | Start the prepared deployment. Optionally run setup first or select an engine. Use restart when changing an active deployment. |
 | `restart [--engine ENGINE]` | Validate and prepare the candidate, drain work, and activate it. Engine names are `openai-whisper` and `faster-whisper`. A drain timeout aborts the cutover. |
-| `stop` | Drain and stop the service containers. |
+| `stop` | Drain and stop the server's Compose project. Stop any remaining Gateway, Whisper or bot containers labeled for that project and checkout. |
 | `status` | Show Compose service state, the saved and active engine settings, and pending edits. |
 | `audit` | Use a locally installed Grype to scan the immutable image IDs of the running Gateway, worker and optional bot. High or critical findings and scanner errors return failure. |
 | `dashboard [--watch] [--job ID]` | Show local job and service metadata, optionally refreshing continuously or filtering by job ID. |
-| `desktop setup`, `desktop start`, `desktop status`, `desktop stop` | Configure, start, inspect or stop the desktop user service. |
+| `desktop setup`, `desktop start`, `desktop status`, `desktop stop` | Configure, start, inspect or stop the native desktop user service. Use `./bin/innervoice-desktop stop` for the Docker recorder and its one-off setup containers. |
+
+If InnerVoice containers remain after shutdown, inspect their Compose project and working directory. Compose normally derives the project from the checkout directory. An earlier checkout or project override can leave another stack running on the same host.
+
+```sh
+docker ps --format 'table {{.ID}}\t{{.Names}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.project.working_dir"}}'
+```
+
+For a separate deployment, run the shutdown command from its checkout with the project settings used to start it. If that checkout is unavailable, confirm the leftover container IDs and wait for any active transcriptions to finish before passing those IDs to `docker stop`. Check `docker ps` again. Stopping containers preserves their files and volumes.
 | `desktop run` | Run the configured desktop recorder in the foreground from a supported graphical session. |
 
 ## Update an existing Gateway deployment

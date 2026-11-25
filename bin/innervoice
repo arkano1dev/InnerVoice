@@ -402,6 +402,28 @@ def compose(cfg,*args,capture=False,allowed_networks=None):
                           capture_output=capture, text=True)
 
 
+def stop_deployment(cfg):
+    project = json.loads(compose(cfg, "config", "--format", "json", capture=True).stdout)["name"]
+    compose(cfg, "stop")
+    # Compose stops services in its current model. An older bot service, for
+    # example, may still exist in the project when the Telegram file is omitted.
+    remaining = subprocess.check_output(
+        ["docker", "ps", "--no-trunc",
+         "--filter", f"label=com.docker.compose.project={project}",
+         "--filter", f"label=com.docker.compose.project.working_dir={REPO}",
+         "--format", '{{.ID}} {{.Label "com.docker.compose.service"}}'],
+        cwd=REPO, text=True,
+    )
+    containers = []
+    for row in remaining.splitlines():
+        container, _, service = row.partition(" ")
+        if service in ("gateway", "whisper", "bot"):
+            containers.append(container)
+    if containers:
+        subprocess.run(["docker", "stop", *containers], cwd=REPO, check=True)
+    print(f"Stopped InnerVoice server containers for Compose project {project}.")
+
+
 def weight_digest(weights):
     digest=hashlib.sha256()
     if weights.is_dir():
@@ -676,10 +698,15 @@ def operate(args):
                 if time.monotonic()>until:
                     raise ValueError("Drain timed out")
                 time.sleep(1)
-            compose(active,"stop")
+            if args.cmd == "stop":
+                stop_deployment(active)
+            else:
+                compose(active,"stop")
         finally:
             drain.unlink(missing_ok=True)
     if args.cmd=="stop":
+        if not ACTIVE.exists():
+            stop_deployment(cfg)
         return
     compose(cfg,"up","-d",*(["--force-recreate"] if args.cmd=="restart" else []),"--no-build","--pull","never","--remove-orphans",
             allowed_networks=allowed_networks)

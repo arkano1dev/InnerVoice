@@ -150,6 +150,17 @@ case "$action" in
     check) exec "${compose[@]}" exec -T desktop /opt/innervoice/bin/python /app/desktop.py check ;;
     status) exec "${compose[@]}" ps -a desktop ;;
     logs) exec "${compose[@]}" logs -f --tail=80 desktop ;;
-    stop) systemctl --user stop innervoice-indicator.service 2>/dev/null || true
-          exec "${compose[@]}" stop desktop ;;
+    stop)
+        systemctl --user stop innervoice-indicator.service 2>/dev/null || true
+        "${compose[@]}" stop desktop
+        # Compose run creates setup containers outside the desktop service lifecycle.
+        one_offs=$(docker ps --quiet \
+            --filter label=com.docker.compose.project=innervoice-desktop \
+            --filter label=com.docker.compose.service=desktop \
+            --filter 'label=com.docker.compose.oneoff=True')
+        if [[ -n "$one_offs" ]]; then
+            mapfile -t containers <<< "$one_offs"
+            docker stop "${containers[@]}"
+        fi
+        ;;
 esac
