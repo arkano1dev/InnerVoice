@@ -14,7 +14,10 @@ WORKDIR /app
 COPY whisper_server.py /app/
 
 EXPOSE 9000
+ENV WHISPER_DEVICE=cpu
 ENV WHISPER_MODEL=medium
 ENV PYTHONUNBUFFERED=1
 
+ENV HOME=/tmp XDG_CACHE_HOME=/tmp/cache
+USER 65534:65534
 CMD ["python", "whisper_server.py"]

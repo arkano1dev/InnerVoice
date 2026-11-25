@@ -1,0 +1,818 @@
+#!/usr/bin/env python3
+"""Private Gateway operator commands (Python 3.11+)."""
+import argparse
+import contextlib
+import fcntl
+import getpass
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import ssl
+import socket
+import shutil
+import sqlite3
+import subprocess
+import stat
+import sys
+import tempfile
+import time
+try:
+    import tomllib
+except ImportError:  # Python 3.10 on Ubuntu 22.04
+    import tomli as tomllib
+
+REPO = Path(__file__).resolve().parents[1]
+HOME = Path(os.environ.get("INNERVOICE_CONFIG_DIR", Path.home()/".config/innervoice")).resolve()
+FILE = HOME/"deployment.toml"
+ACTIVE = HOME/"active.toml"
+ENGINES = ("openai-whisper","faster-whisper")
+MODELS = ("tiny", "base", "small", "medium", "large", "large-v1", "large-v2", "large-v3")
+PRIVATE_NETWORKS = tuple(ipaddress.IPv4Network(cidr) for cidr in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
+))
+DEFAULT = {"deployment":{"version":1,"engine":ENGINES[0],"bind":"","allowed_networks":"","port":9000,"enable":False,"telegram":False,
+                         "data":str(HOME/"state"),"secrets":str(HOME/"secrets")},
+           "limits":{"max_seconds":3600,"upload_mib":128,"quota_mib":1024,"free_floor_mib":64,"jobs":8,"jobs_per_owner":4,"uploads":2,"attempts":3},
+           "retention":{"result_seconds":3600,"failed_seconds":86400,"tombstone_seconds":86400,"telemetry_days":30},
+           "validation":{"retained_terms":""},
+           "benchmark":{"repeats":3,"warm_rtf_limit":1.0},
+           "bot.defaults":{"ui_language":"es","language":"es","mode":"full","show_stats":True,"timestamps":False},
+           **{e:{"image":"","weights":"","digest":"","model":"medium","image_id":"","fp16":True,"beam":1,"previous_text":False,"compile":True,"idle_seconds":900} for e in ENGINES}}
+
+
+def atomic(path,data):
+    with tempfile.NamedTemporaryFile(dir=path.parent,delete=False) as out:
+        out.write(data)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(out.name,path)
+    fd=os.open(path.parent,os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def serialize(cfg):
+    return "".join("["+section+"]\n"+"".join(f"{k} = {json.dumps(v)}\n" for k,v in values.items())+"\n"
+                   for section,values in cfg.items()).encode()
+
+
+def read(path):
+    with path.open("rb") as stream:
+        cfg=tomllib.load(stream)
+    cfg["deployment"].setdefault("telegram", False)
+    cfg["bot.defaults"]=cfg.pop("bot")["defaults"]
+    return cfg
+
+
+def validate(cfg):
+    d=cfg["deployment"]
+    private_address(d["bind"])
+    if type(d.get("listen_all", False)) is not bool:
+        raise ValueError("deployment.listen_all must be true or false")
+    if not 1<=d["port"]<=65535 or d["engine"] not in ENGINES or d["version"]!=1:
+        raise ValueError("Invalid deployment settings")
+    client_networks(d["allowed_networks"])
+    for section,values in DEFAULT.items():
+        for key,default in values.items():
+            if type(cfg[section][key]) is not type(default):
+                raise ValueError("Invalid setting type: "+section+"."+key)
+    if any(v<=0 for group in ("retention","limits","benchmark") for v in cfg[group].values()):
+        raise ValueError("Limits, retention and benchmark settings must be positive")
+    if cfg["limits"]["max_seconds"]>3600 or cfg["limits"]["jobs_per_owner"]>cfg["limits"]["jobs"]:
+        raise ValueError("Invalid capacity settings")
+    for k in ("data","secrets"):
+        if not Path(d[k]).is_absolute():
+            raise ValueError("Use absolute data and secret directories")
+    state, secrets_dir = (Path(d[k]).resolve() for k in ("data", "secrets"))
+    if state == secrets_dir or state in secrets_dir.parents or secrets_dir in state.parents:
+        raise ValueError("Choose separate state and secret directories")
+    for engine in ENGINES:
+        profile=cfg[engine]
+        if profile["model"] not in MODELS:
+            raise ValueError("Select multilingual translation weights")
+    b=cfg["bot.defaults"]
+    if b["ui_language"] not in ("en","es") or b["language"] not in "es en fr nl pt it ja zh".split() or b["mode"] not in ("fast","full"):
+        raise ValueError("Invalid Telegram defaults")
+
+
+def set_value(cfg,field,raw):
+    section,key=field.rsplit(".",1)
+    old=False if field=="deployment.listen_all" else DEFAULT[section][key]
+    if type(old) is bool and raw.lower() not in ("true","false"):
+        raise ValueError("Boolean settings accept true or false")
+    cfg[section][key]=raw.lower()=="true" if type(old) is bool else type(old)(raw)
+
+
+def save_config(cfg):
+    if FILE.exists():
+        if read(FILE) == cfg:
+            return
+        atomic(HOME/"previous.toml", FILE.read_bytes())
+    atomic(FILE, serialize(cfg))
+
+
+def edit_config(cfg):
+    for section,fields in cfg.items():
+        for key,value in fields.items():
+            if key in ("version","engine"):
+                continue
+            raw=input(f"{section}.{key} [{value}]: ").strip()
+            if raw:
+                set_value(cfg,section+"."+key,raw)
+    validate(cfg)
+    if input("Save settings [y/N]? ").lower()!="y":
+        raise SystemExit("Cancelled")
+    save_config(cfg)
+
+
+def private_address(value):
+    address = ipaddress.IPv4Address(value)
+    if not any(address in network for network in PRIVATE_NETWORKS):
+        raise ValueError("Enter a private IPv4 address on the server's LAN, VLAN or virtual network.")
+    return str(address)
+
+
+def client_networks(value, *, resolve=False):
+    entries = []
+    label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    for part in value.split(","):
+        peer = part.strip().lower()
+        if not peer:
+            continue
+        if len(peer.rstrip(".")) <= 253 and re.fullmatch(rf"(?:{label}\.)+nord\.?", peer):
+            peer = peer.removesuffix(".")
+            if not resolve:
+                entries.append(peer)
+                continue
+            try:
+                addresses = {entry[4][0] for entry in socket.getaddrinfo(
+                    peer, None, family=socket.AF_INET, type=socket.SOCK_STREAM
+                )}
+            except socket.gaierror:
+                raise ValueError("A Nord name could not be resolved. Check Meshnet on the Gateway host.") from None
+            if len(addresses) != 1 or ipaddress.IPv4Address(next(iter(addresses))) not in PRIVATE_NETWORKS[-1]:
+                raise ValueError("Each Nord name must resolve to one Meshnet IPv4 address.")
+            peer = addresses.pop()
+        try:
+            network = ipaddress.IPv4Network(peer)
+        except ValueError:
+            raise ValueError("Use private client IPv4 addresses, CIDRs or full Nord names, separated by commas.") from None
+        if not any(network.subnet_of(private) for private in PRIVATE_NETWORKS):
+            raise ValueError("Allowed clients must be on private IPv4 networks.")
+        entries.append(str(network))
+    if not entries:
+        raise ValueError("Enter at least one allowed client.")
+    return ",".join(dict.fromkeys(entries))
+
+
+def listen_port(value):
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise ValueError("Enter a port from 1 to 65535.")
+    return port
+
+
+def prompt(label, default, parse):
+    suffix = f" [{default}]" if default else ""
+    while True:
+        value = input(f"  {label}{suffix}: ").strip() or default
+        try:
+            return parse(value)
+        except (ValueError, OSError) as error:
+            print(f"  {error}")
+
+
+def local_image_id(image):
+    result = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        capture_output=True, text=True,
+    )
+    image_id = result.stdout.strip()
+    if result.returncode or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise ValueError(f"Docker could not inspect {image!r}. Check the image tag, Docker service and permissions.")
+    return image_id
+
+
+def select_image(image):
+    if not image:
+        raise ValueError("Enter a local Docker image tag or digest.")
+    return image, local_image_id(image)
+
+
+def select_model(value):
+    if value not in MODELS:
+        raise ValueError("Choose a multilingual model: " + ", ".join(MODELS))
+    return value
+
+
+def select_weights(value, engine):
+    if not value:
+        raise ValueError("Enter the path to your existing model weights.")
+    path = Path(value).expanduser().resolve()
+    if engine == "openai-whisper" and not path.is_file():
+        raise ValueError("Choose a readable Whisper .pt checkpoint file.")
+    if engine == "faster-whisper" and not path.is_dir():
+        raise ValueError("Choose the directory containing the converted Faster Whisper model.")
+    print("  Calculating SHA-256…", flush=True)
+    return str(path), weight_digest(path)
+
+
+def configure_worker(cfg, engine):
+    profile = cfg[engine]
+    print("\nWhisper worker")
+    print(f"  Engine: {engine}. Reuse a local worker image and trusted model weights.")
+    print("  List local images with 'docker image ls'.")
+    default_image = profile["image"] or ("innervoice-whisper" if engine == "openai-whisper" else "")
+    image, image_id = prompt("Worker image", default_image, select_image)
+    model = prompt("Model size", profile["model"], select_model)
+    default_weights = profile["weights"] if model == profile["model"] else ""
+    cached = Path.home()/".cache"/"whisper"/f"{model}.pt"
+    if not default_weights and engine == "openai-whisper" and cached.is_file():
+        default_weights = str(cached)
+    weights, digest = prompt("Path to local weights", default_weights, lambda value: select_weights(value, engine))
+    if image == profile["image"] and profile["image_id"] and image_id != profile["image_id"]:
+        print("  The saved image tag now points to a different image.")
+    print(f"  Weights SHA-256: {digest}")
+    expected = profile["digest"] if weights == profile["weights"] else ""
+    if digest != expected:
+        print("  Compare this digest with your trusted source. Use only weights you have verified.")
+        if input("  Trust this checkpoint? [y/N]: ").strip().lower() not in ("y", "yes"):
+            raise SystemExit("Setup cancelled. Settings were not saved.")
+    profile.update(image=image, image_id=image_id, model=model, weights=weights, digest=digest)
+    cfg["deployment"]["engine"] = engine
+
+
+def setup(cfg, engine=None):
+    if not shutil.which("docker"):
+        raise ValueError("Install Docker Engine and Compose, then run setup again.")
+    deployment = cfg["deployment"]
+    previous_endpoint = (deployment["bind"], deployment["port"])
+    engine = engine or deployment["engine"]
+    print("InnerVoice private Gateway setup")
+    print("Press Enter to keep a value in brackets. Ctrl+C cancels before saving.\n")
+    print("1/4  Private network")
+    print("  Use the server's IP on the network your voice client can reach.")
+    deployment["bind"] = prompt("Server IPv4 address (LAN, VLAN or virtual network)", deployment["bind"], private_address)
+    deployment["port"] = prompt("HTTPS port", str(deployment["port"]), listen_port)
+    print("  For direct Meshnet, use the server's Meshnet IPv4 and allow incoming traffic from each linked client.")
+    print("  Enter individual client IPv4 addresses or full Nord names ending in .nord.")
+    print("  Use a CIDR only to grant access to an entire subnet. Separate entries with commas.")
+    print("  Nord names resolve on this server when the Gateway starts. Clients also need a scoped bearer.")
+    deployment["allowed_networks"] = prompt("Allowed clients", deployment["allowed_networks"], client_networks)
+
+    configure_worker(cfg, engine)
+    validate(cfg)
+
+    print("\n3/4  HTTPS and client access")
+    secret_dir = Path(deployment["secrets"])
+    cert, key = secret_dir/"tls.crt", secret_dir/"tls.key"
+    create_tls = not (cert.exists() or key.exists())
+    if create_tls:
+        if not shutil.which("openssl"):
+            raise ValueError("Install openssl to create the Gateway certificate, or supply tls.crt and tls.key.")
+        print("  A self-signed certificate will be created for the server IP.")
+    else:
+        check_tls(secret_dir, deployment["bind"])
+        print("  Reusing the existing certificate and key.")
+    clients = secret_dir/"clients.json"
+    client_dir = HOME/"clients"/"operator-smoke"
+    create_client = not clients.exists()
+    if create_client:
+        print("  A smoke-test credential and client config will be saved locally.")
+    else:
+        check_clients(clients)
+        print("  Reusing existing client credentials.")
+
+    print("\n4/4  Review and save")
+    print(f"  URL: https://{deployment['bind']}:{deployment['port']}")
+    print(f"  Allowed clients: {deployment['allowed_networks']}")
+    profile = cfg[engine]
+    print(f"  Worker: {profile['image']} ({profile['image_id']})")
+    print(f"  Model: {profile['model']} | New API jobs: {'enabled' if deployment['enable'] else 'disabled'}")
+    if input("  Save this setup? [y/N]: ").strip().lower() not in ("y", "yes"):
+        raise SystemExit("Setup cancelled. Settings were not saved.")
+    secret_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    created = []
+    try:
+        if create_tls:
+            generate_tls(secret_dir, deployment["bind"], created)
+        if create_client:
+            create_smoke_client(cfg, client_dir, created)
+        save_config(cfg)
+    except (Exception, KeyboardInterrupt):
+        for path in reversed(created):
+            path.unlink(missing_ok=True)
+        raise
+    print(f"Saved Gateway settings to {FILE}")
+    if create_client:
+        print(f"Smoke-test client files: {client_dir}")
+    elif previous_endpoint != (deployment["bind"], deployment["port"]):
+        print("Update your client URLs to match the new address or port.")
+    if not deployment["enable"]:
+        print("New API jobs are disabled. After checking network access, enable them with:")
+        print("  ./bin/innervoice config set deployment.enable=true")
+        print("  ./bin/innervoice restart")
+
+
+def write_new_file(path, data, created):
+    with path.open("xb") as stream:
+        created.append(path)
+        stream.write(data)
+
+
+def generate_tls(root, address, created):
+    with tempfile.TemporaryDirectory(dir=root) as directory:
+        staging = Path(directory)
+        try:
+            subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:3072", "-nodes", "-days", "90",
+                 "-subj", "/CN=InnerVoice", "-addext", f"subjectAltName=IP:{address}",
+                 "-keyout", str(staging/"tls.key"), "-out", str(staging/"tls.crt")],
+                capture_output=True, check=True,
+            )
+        except subprocess.CalledProcessError:
+            raise ValueError("OpenSSL could not generate the TLS certificate.") from None
+        check_tls(staging, address)
+        for name in ("tls.key", "tls.crt"):
+            write_new_file(root/name, (staging/name).read_bytes(), created)
+
+
+def create_smoke_client(cfg, directory, created):
+    d = cfg["deployment"]
+    root = Path(d["secrets"])
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    bearer = secrets.token_urlsafe(32)
+    token_file = directory/"bearer"
+    ca = directory/"ca.crt"
+    client = {"url": f"https://{d['bind']}:{d['port']}", "ca": str(ca),
+              "token_file": str(token_file), "state_dir": str(directory/"state"),
+              "deadline": 300, "source_ip": "", "source_port": 0}
+    write_new_file(token_file, bearer.encode(), created)
+    trust_cert = root/"ca.crt"
+    if not trust_cert.is_file():
+        trust_cert = root/"tls.crt"
+    write_new_file(ca, trust_cert.read_bytes(), created)
+    write_new_file(directory/"client.toml", serialize({"client": client}), created)
+    credential_map = {"operator-smoke": hashlib.sha256(bearer.encode()).hexdigest()}
+    write_new_file(root/"clients.json", json.dumps(credential_map).encode(), created)
+
+
+def env(cfg):
+    d=cfg["deployment"]
+    p=cfg[d["engine"]]
+    options={f"IV_{k.upper()}":str(v) for group in ("limits","retention","validation") for k,v in cfg[group].items()}
+    return dict(os.environ,**options,IV_PUBLISH="0.0.0.0" if d.get("listen_all",False) else d["bind"],IV_FP16=str(p["fp16"]).lower(),IV_BEAM=str(p["beam"]),
+                IV_PREVIOUS=str(p["previous_text"]).lower(),IV_COMPILE=str(p["compile"]).lower(),IV_IDLE=str(p["idle_seconds"]),
+                IV_ENGINE=d["engine"],IV_UID=str(os.getuid()),IV_GID=str(os.getgid()),
+                IV_BIND=d["bind"],IV_ALLOWED_NETWORKS=d["allowed_networks"],IV_PORT=str(d["port"]),IV_ENABLE=str(int(d["enable"])),
+                IV_BEARER_FILE=str(HOME/"telegram"/"gateway-bearer"),
+                IV_RAM_MIB=str(cfg["limits"]["quota_mib"]+cfg["limits"]["free_floor_mib"]),
+                IV_IMAGE=p["image"],IV_WEIGHTS=p["weights"],IV_MODEL=p["model"],IV_DIGEST=p["digest"],
+                IV_ACCESS_DIR=str(HOME/"gateway-access"),IV_SOCKET_DIR=str(HOME/"telegram-socket"),
+                IV_DATA=d["data"],IV_SECRETS=d["secrets"],IV_BOT=json.dumps(cfg["bot.defaults"]),
+                IV_REVISION=hashlib.sha256(json.dumps([p,d["engine"],cfg["validation"],"decoder-v1"],sort_keys=True).encode()).hexdigest())
+
+
+def compose(cfg,*args,capture=False,allowed_networks=None,timeout=None):
+    files = ["-f","docker-compose.yml","-f","compose.private.yml"]
+    if cfg["deployment"].get("telegram"):
+        files += ["-f","compose.telegram.yml"]
+    command = ["docker", "compose", *files]
+    environment = env(cfg)
+    if allowed_networks is not None:
+        environment["IV_ALLOWED_NETWORKS"] = allowed_networks
+    if args[0] == "up":
+        # Read the effective device mapping, including overrides from Compose's .env.
+        config = subprocess.run([*command, "config", "--format", "json", "whisper"],
+                                cwd=REPO, env=environment, check=True, capture_output=True, text=True)
+        worker = json.loads(config.stdout)["services"]["whisper"]
+        if worker["group_add"] == ["render"]:
+            node = next(device["source"] for device in worker["devices"] if device["target"] != "/dev/kfd")
+            device_stat = Path(node).stat()
+            if not stat.S_ISCHR(device_stat.st_mode) or device_stat.st_gid == 0:
+                raise ValueError(f"Expected a GPU character device with a dedicated non-root group at {node}")
+            environment["WHISPER_RENDER_GROUP"] = str(device_stat.st_gid)
+    return subprocess.run([*command, *args], cwd=REPO, env=environment, check=True,
+                          capture_output=capture, text=True, timeout=timeout)
+
+
+def verify_worker_gpu(cfg):
+    # Run outside Gunicorn so a native runtime crash cannot kill its worker.
+    probe = "import torch; assert torch.ones(8, device='cuda').tolist() == [1.0] * 8"
+    try:
+        compose(cfg, "exec", "-T", "whisper", "python", "-X", "faulthandler", "-c", probe,
+                timeout=30)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise ValueError(
+            "Whisper detected a GPU but could not execute a small tensor test. "
+            "Check the worker image and ROCm settings. If the previous deployment used "
+            "HSA_OVERRIDE_GFX_VERSION, restore its known-good value in the private .env. "
+            "See docs/private-gateway.md#check-rocm-compatibility-with-the-previous-deployment."
+        ) from error
+
+
+def stop_deployment(cfg):
+    project = json.loads(compose(cfg, "config", "--format", "json", capture=True).stdout)["name"]
+    compose(cfg, "stop")
+    # Compose stops services in its current model. An older bot service, for
+    # example, may still exist in the project when the Telegram file is omitted.
+    remaining = subprocess.check_output(
+        ["docker", "ps", "--no-trunc",
+         "--filter", f"label=com.docker.compose.project={project}",
+         "--filter", f"label=com.docker.compose.project.working_dir={REPO}",
+         "--format", '{{.ID}} {{.Label "com.docker.compose.service"}}'],
+        cwd=REPO, text=True,
+    )
+    containers = []
+    for row in remaining.splitlines():
+        container, _, service = row.partition(" ")
+        if service in ("gateway", "whisper", "bot"):
+            containers.append(container)
+    if containers:
+        subprocess.run(["docker", "stop", *containers], cwd=REPO, check=True)
+    print(f"Stopped InnerVoice server containers for Compose project {project}.")
+
+
+def weight_digest(weights):
+    digest=hashlib.sha256()
+    if weights.is_dir():
+        files=sorted(f for f in weights.rglob("*") if f.is_file())
+        if not files:
+            raise ValueError("Empty weights directory")
+    else:
+        files=[weights]
+    for f in files:
+        if weights.is_dir():
+            digest.update(f.relative_to(weights).as_posix().encode()+b"\0")
+        with f.open("rb") as stream:
+            while chunk:=stream.read(1024**2):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def check_tls(secret_dir, address):
+    if not all((secret_dir/name).is_file() for name in ("tls.crt", "tls.key")):
+        raise ValueError("Install both tls.crt and tls.key in the configured secrets directory.")
+    ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(secret_dir/"tls.crt",secret_dir/"tls.key")
+    cert=ssl._ssl._test_decode_cert(str(secret_dir/"tls.crt"))
+    if ("IP Address", address) not in cert.get("subjectAltName", ()):
+        raise ValueError("The TLS certificate must include the selected server IP. Install a matching certificate or keep the current IP.")
+    if not ssl.cert_time_to_seconds(cert["notBefore"]) <= time.time() < ssl.cert_time_to_seconds(cert["notAfter"]):
+        raise ValueError("The TLS certificate is expired or not yet valid. Install a currently valid certificate.")
+
+
+def check_clients(path):
+    if not path.is_file():
+        raise ValueError("Client credentials are missing. Run ./bin/innervoice config setup.")
+    clients = json.loads(path.read_bytes())
+    if not isinstance(clients, dict) or not clients:
+        raise ValueError("Invalid credential map")
+    seen = set()
+    for label, entry in clients.items():
+        digest = entry.get("digest") if isinstance(entry, dict) else entry
+        if not (re.fullmatch(r"[a-z0-9-]{1,48}", label) and isinstance(digest, str)
+                and re.fullmatch(r"[0-9a-f]{64}", digest) and digest not in seen):
+            raise ValueError("Invalid credential map")
+        seen.add(digest)
+        if isinstance(entry, dict):
+            if entry.get("scope") not in ("jobs", "sessions", "both"):
+                raise ValueError("Invalid client scope")
+            if entry.get("peer"):
+                private_address(entry["peer"])
+
+
+
+def private_directory(path):
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = path.stat()
+    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+        raise ValueError(f"{path} must belong to the service account and have mode 0700")
+
+
+def publish_registry(source):
+    directory = HOME/"gateway-access"
+    private_directory(directory)
+    atomic(directory/"clients.json", source.read_bytes())
+
+
+def preflight(cfg):
+    d=cfg["deployment"]
+    if os.getuid() == 0 or os.getgid() == 0:
+        raise ValueError("Use a non-root service account and group")
+    if len(Path("/proc/swaps").read_text().splitlines()) > 1:
+        raise ValueError("Disable swap on the Docker host before processing private audio")
+    if d.get("telegram"):
+        private_directory(HOME/"telegram-socket")
+        folder = HOME/"telegram"
+        private_directory(folder)
+        if not (folder/"gateway-bearer").exists():
+            atomic(folder/"gateway-bearer", secrets.token_urlsafe(48).encode())
+    p=cfg[d["engine"]]
+    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}",p["image"]) and not re.fullmatch(r"sha256:[0-9a-f]{64}",p["image_id"]):
+        raise ValueError("Run ./bin/innervoice config setup to pin the worker image.")
+    image_id = local_image_id(p["image"])
+    if p["image_id"] and p["image_id"]!=image_id:
+        raise ValueError("The worker image has changed. Run ./bin/innervoice config setup to review the new image.")
+    if not p["fp16"] and d["engine"]=="faster-whisper":
+        raise ValueError("Experimental engine requires float16")
+    if p["beam"]<1 or p["idle_seconds"]<0:
+        raise ValueError("Invalid decoder or idle settings")
+    weights=Path(p["weights"])
+    if not weights.is_absolute():
+        raise ValueError("Use an absolute local weights path")
+    if weight_digest(weights)!=p["digest"]:
+        raise ValueError("The weights have changed. Verify the checkpoint before updating its saved digest.")
+    secret_dir = Path(d["secrets"])
+    private_directory(secret_dir)
+    if (secret_dir/"tls.key").stat().st_mode & 0o077:
+        raise ValueError("Restrict the Gateway TLS private key to the service account")
+    check_tls(secret_dir, d["bind"])
+    check_clients(secret_dir/"clients.json")
+    publish_registry(secret_dir/"clients.json")
+    state = Path(d["data"])
+    private_directory(state)
+    if any(f.suffix in (".pcm", ".upload", ".part") for f in state.iterdir()):
+        raise ValueError("Earlier audio spool files exist. Drain the previous deployment and review its state before upgrading.")
+
+
+def snapshot(cfg,job=None):
+    path=Path(cfg["deployment"]["data"])/"jobs.db"
+    with contextlib.closing(sqlite3.connect(path.as_uri()+"?mode=ro",uri=True,timeout=1)) as db:
+        db.row_factory=sqlite3.Row
+        query="SELECT * FROM performance"
+        params=()
+        if job:
+            query+=" WHERE id=?"
+            params=(job,)
+        rows=[dict(r) for r in db.execute(query+" ORDER BY created DESC LIMIT 25",params)]
+        for row in rows:
+            duration=row["audio_seconds"]
+            row["real_time_factor"]=row["inference_seconds"]/duration if duration else None
+        signal=db.execute("SELECT observed,profile,admitting FROM heartbeat WHERE singleton=1").fetchone()
+        return dict(service=dict(signal) if signal else None,stale=not signal or time.time()-signal["observed"]>35,
+                    jobs=rows,rejections=dict(db.execute("SELECT code,count FROM rejections")))
+
+
+
+def operate(args):
+    cfg=read(FILE) if FILE.exists() else {k:dict(v) for k,v in DEFAULT.items()}
+    if args.cmd=="config" and args.action=="edit":
+        edit_config(cfg)
+        return
+    if args.cmd=="initialize" or args.setup or (args.cmd=="config" and args.action=="setup"):
+        setup(cfg, args.engine if args.cmd=="start" else None)
+        if args.cmd!="start":
+            return
+    if not FILE.exists():
+        raise ValueError("Run innervoice start --setup first")
+    if args.cmd=="config":
+        if args.action=="worker":
+            configure_worker(cfg, args.engine or cfg["deployment"]["engine"])
+            validate(cfg)
+            save_config(cfg)
+            print("Worker profile saved. Apply with ./bin/innervoice restart.")
+        elif args.action=="set":
+            for pair in args.values:
+                field,raw=pair.split("=",1)
+                if field=="deployment.engine":
+                    raise ValueError("Select engine with start or restart --engine")
+                set_value(cfg,field,raw)
+            validate(cfg)
+            save_config(cfg)
+        elif args.action=="show":
+            visible={k:dict(v) for k,v in cfg.items()}
+            for k in ("data","secrets","bind","allowed_networks"):
+                visible["deployment"][k]="<configured>" if cfg["deployment"][k] else "<unset>"
+            for engine in ENGINES:
+                visible[engine]["weights"]="<configured>" if cfg[engine]["weights"] else "<unset>"
+            visible["validation"]["retained_terms"]="<configured>"
+            print(serialize(visible).decode())
+        else:
+            validate(cfg)
+        return
+    validate(cfg)
+    active=read(ACTIVE) if ACTIVE.exists() else cfg
+    if args.cmd == "audit":
+        if not shutil.which("grype"):
+            raise ValueError("Install Grype on the operator host to scan the exact running images")
+        services = ["gateway","whisper"] + (["bot"] if active["deployment"]["telegram"] else [])
+        failed = []
+        for service in services:
+            container = compose(active,"ps","--status","running","-q",service,capture=True).stdout.strip()
+            if not container:
+                raise ValueError(f"{service} is not running")
+            image = subprocess.check_output(["docker","inspect","--format","{{.Image}}",container], text=True).strip()
+            if service == "gateway":
+                project = subprocess.check_output(
+                    ["docker","inspect","--format",'{{index .Config.Labels "com.docker.compose.project"}}',container],
+                    text=True).strip()
+                old_volumes = subprocess.check_output(
+                    ["docker","volume","ls","-q","--filter","label=com.docker.compose.project="+project,
+                     "--filter","label=com.docker.compose.volume=audio_temp"], text=True).splitlines()
+                for volume in old_volumes:
+                    check = ("from pathlib import Path; import sys; "
+                             "sys.exit(any(p.suffix.lower() in {'.ogg','.wav','.pcm','.raw','.upload','.part'} "
+                             "for p in Path('/legacy').iterdir()))")
+                    scan = subprocess.run(
+                        ["docker","run","--rm","--pull","never","--network","none","--read-only",
+                         "--cap-drop","ALL","--security-opt","no-new-privileges","--user",f"{os.getuid()}:{os.getgid()}",
+                         "--mount",f"type=volume,source={volume},target=/legacy,readonly,volume-nocopy",
+                         "--entrypoint","python",image,"-c",check])
+                    if scan.returncode:
+                        print("Legacy bot volume contains audio or could not be inspected:", volume)
+                        failed.append("legacy bot storage")
+            print(f"Scanning {service} {image}", flush=True)
+            result = subprocess.run(["grype","docker:"+image,"--fail-on","high"])
+            if result.returncode:
+                failed.append(service)
+        if failed:
+            raise ValueError("Review scan failures or findings for: " + ", ".join(failed))
+        return
+    if args.cmd in ("logs", "build", "worker-only"):
+        if args.action and args.action not in ("gateway", "whisper", "bot"):
+            raise ValueError("Choose gateway, whisper or bot")
+        if args.cmd == "logs":
+            compose(active,"logs","-f", *([args.action] if args.action else []))
+        elif args.cmd == "build":
+            compose(cfg,"build","gateway", *(["bot"] if cfg["deployment"]["telegram"] else []))
+        else:
+            preflight(cfg)
+            compose(cfg,"up","-d","--no-build","--pull","never","whisper",
+                    allowed_networks=client_networks(cfg["deployment"]["allowed_networks"], resolve=True))
+        return
+    if args.cmd=="dashboard":
+        while True:
+            try:
+                print(json.dumps({"at":time.time(),"jobs":snapshot(active,args.job)}),flush=True)
+            except sqlite3.Error:
+                print("Gateway metadata unavailable; snapshot stale",flush=True)
+            if not args.watch:
+                return
+            time.sleep(2)
+    if args.cmd=="status":
+        compose(active,"ps")
+        print("Saved engine:",cfg["deployment"]["engine"],"active engine:",active["deployment"]["engine"] if ACTIVE.exists() else "unavailable",
+              "pending edits:",not ACTIVE.exists() or active!=cfg)
+        return
+    if args.cmd=="credential":
+        root=Path(cfg["deployment"]["secrets"])
+        root.mkdir(mode=0o700,parents=True,exist_ok=True)
+        path=root/"clients.json"
+        clients=json.loads(path.read_bytes()) if path.exists() else {}
+        if not re.fullmatch(r"[a-z0-9-]{1,48}",args.identity or ""):
+            raise ValueError("Use a short lowercase integration label")
+        previous = clients.get(args.identity)
+        policy = previous if isinstance(previous, dict) else {}
+        peer = private_address(args.peer) if args.peer else policy.get("peer", "")
+        scope = args.scope or policy.get("scope", "both")
+        message = "Client bearer token (Enter keeps the registered token): " if previous else "New client bearer token (32+ characters): "
+        secret = getpass.getpass(message)
+        if previous and not secret:
+            digest = previous["digest"] if isinstance(previous, dict) else previous
+        else:
+            if len(secret)<32 or not secret.isascii() or any(c.isspace() or not c.isprintable() for c in secret):
+                raise ValueError("Use a printable token of at least 32 characters without spaces")
+            digest=hashlib.sha256(secret.encode()).hexdigest()
+        if any((v.get("digest") if isinstance(v, dict) else v) == digest and k != args.identity for k,v in clients.items()):
+            raise ValueError("Each integration requires its own token")
+        clients[args.identity]={"digest":digest, "scope":scope, "peer":peer}
+        atomic(path,json.dumps(clients).encode())
+        publish_registry(path)
+        return
+    if args.engine:
+        cfg["deployment"]["engine"]=args.engine
+    if args.cmd=="start" and ACTIVE.exists() and active != cfg:
+        running=compose(active,"ps","--status","running","-q",capture=True).stdout.strip()
+        if running:
+            raise ValueError("Settings saved. Run ./bin/innervoice restart to apply them to the running deployment.")
+    if args.cmd!="stop":
+        allowed_networks = client_networks(cfg["deployment"]["allowed_networks"], resolve=True)
+        print("Checking the worker image, model weights and HTTPS configuration…", flush=True)
+        preflight(cfg)
+        # Complete candidate builds before interrupting an active service.
+        compose(cfg,"build", "gateway", *(["bot"] if cfg["deployment"]["telegram"] else []))
+    if args.cmd in ("stop","restart") and ACTIVE.exists():
+        data=Path(active["deployment"]["data"])
+        drain=data/"drain"
+        (data/"drained").unlink(missing_ok=True)
+        atomic(drain,b"1")
+        try:
+            until=time.monotonic()+120
+            while compose(active,"ps","--status","running","-q","gateway",capture=True).stdout.strip():
+                with contextlib.closing(sqlite3.connect((data/"jobs.db").as_uri()+"?mode=ro",uri=True)) as db:
+                    busy=db.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','processing')").fetchone()[0]
+                if not busy and (data/"drained").exists():
+                    break
+                if time.monotonic()>until:
+                    raise ValueError("Drain timed out")
+                time.sleep(1)
+            if args.cmd == "stop":
+                stop_deployment(active)
+            else:
+                compose(active,"stop")
+        finally:
+            drain.unlink(missing_ok=True)
+    if args.cmd=="stop":
+        if not ACTIVE.exists():
+            stop_deployment(cfg)
+        return
+    # Keep admission closed if activation fails or the operator is interrupted.
+    startup = Path(cfg["deployment"]["data"]) / "startup-pending"
+    atomic(startup, b"1")
+    compose(cfg,"up","-d",*(["--force-recreate"] if args.cmd=="restart" else []),"--no-build","--pull","never","--remove-orphans",
+            allowed_networks=allowed_networks)
+    print("Waiting for the Gateway and Whisper to respond…", flush=True)
+    probe=("import requests,socket,ssl; c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); "
+           "c.check_hostname=False; c.verify_mode=ssl.CERT_NONE; "
+           "s=c.wrap_socket(socket.create_connection(('127.0.0.1',9443),3)); "
+           "pem=open('/run/innervoice/tls.crt').read().split('-----END CERTIFICATE-----')[0]+'-----END CERTIFICATE-----'; "
+           "assert s.getpeercert(binary_form=True)==ssl.PEM_cert_to_DER_cert(pem); s.close(); "
+           "client=requests.Session(); client.trust_env=False; h=client.get('http://whisper:9000/health',timeout=7).json(); "
+           "g=client.get('http://whisper:9000/gpu-check',timeout=7).json(); "
+           "print(h['engine'],h['model'],h['profile'],g['gpu'].get('available',False))")
+    expected=" ".join((cfg["deployment"]["engine"],cfg[cfg["deployment"]["engine"]]["model"],env(cfg)["IV_REVISION"],"True"))
+    for _ in range(30):
+        try:
+            if compose(cfg,"exec","-T","gateway","python","-c",probe,capture=True).stdout.strip()==expected:
+                break
+        except subprocess.CalledProcessError:
+            pass
+        time.sleep(2)
+    else:
+        compose(cfg,"stop")
+        raise ValueError("Activation failed. Inspect 'docker compose logs --tail=80 gateway whisper'. Restore the previous settings before retrying.")
+    try:
+        verify_worker_gpu(cfg)
+    except ValueError:
+        compose(cfg, "stop")
+        raise
+    atomic(ACTIVE,serialize(cfg))
+    atomic(FILE,serialize(cfg))
+    startup.unlink()
+    d = cfg["deployment"]
+    print(f"Gateway ready at https://{d['bind']}:{d['port']}.")
+    print("Send a short test audio to verify inference.")
+
+
+def main():
+    if sys.argv[1:2]==["desktop"]:
+        script=str(REPO/"clients/desktop.py")
+        os.execv(sys.executable,[sys.executable,script,*sys.argv[2:]])
+    if sys.argv[1:3] == ["agent", "setup"]:
+        script = str(REPO/"clients/desktop.py")
+        os.execv(sys.executable, [sys.executable, script, "agent-setup"])
+    parser=argparse.ArgumentParser(description="Operate the private InnerVoice Gateway.",
+        formatter_class=argparse.RawDescriptionHelpFormatter, epilog="""First use
+  start --setup          Configure the endpoint, worker and TLS, then start.
+
+Daily operation
+  status                 Show running services and unapplied settings.
+  config worker          Choose a model, image and verified local weights.
+  config set KEY=VALUE   Save decoder, network or admission settings.
+  config show            Display the saved profile with private paths masked.
+  config validate        Check saved settings.
+  config edit            Edit advanced settings interactively.
+  config setup           Revisit the full wizard.
+  restart                Drain jobs and apply the saved profile.
+  credential --identity  Register or rotate a dedicated integration token.
+  dashboard --watch      Watch recent jobs and performance.
+  stop                   Drain jobs and stop services.
+  desktop                Manage a native desktop client (setup/start/stop/status/check).
+  agent setup            Save a local connection for the command STT provider.""")
+    parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential","logs","build","worker-only","audit"])
+    parser.add_argument("action",nargs="?")
+    parser.add_argument("values",nargs="*")
+    parser.add_argument("--setup",action="store_true",help="walk through private Gateway setup before starting")
+    parser.add_argument("--engine",choices=ENGINES,help="select a saved engine profile, or configure it with config worker")
+    parser.add_argument("--job",help="filter dashboard by job ID")
+    parser.add_argument("--watch",action="store_true",help="refresh the dashboard every two seconds")
+    parser.add_argument("--scope", choices=("jobs","sessions","both"), help="limit this credential to agent jobs or desktop sessions")
+    parser.add_argument("--peer",help="restrict this token to one observed private source IPv4")
+    parser.add_argument("--identity",help="unique lowercase name for this client")
+    args=parser.parse_args()
+    if args.cmd == "config" and args.action not in ("setup", "worker", "show", "set", "validate", "edit"):
+        parser.error("Choose config setup, worker, show, set, validate or edit.")
+    if args.setup and args.cmd != "start":
+        parser.error("--setup is available with start. Use 'config setup' to configure without starting.")
+    os.umask(0o077)
+    HOME.mkdir(mode=0o700,parents=True,exist_ok=True)
+    with (HOME/"operator.lock").open("a") as lock:
+        if args.cmd not in ("dashboard","status","logs","audit"):
+            fcntl.flock(lock,fcntl.LOCK_EX)
+        operate(args)
+
+
+if __name__=="__main__":
+    try:
+        main()
+    except (KeyboardInterrupt, EOFError):
+        sys.exit("Setup or command cancelled.")
+    except (ValueError,KeyError,OSError,sqlite3.Error,subprocess.CalledProcessError) as error:
+        sys.exit(str(error))

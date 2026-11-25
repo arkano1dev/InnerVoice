@@ -1,0 +1,3 @@
+services:
+  desktop:
+    network_mode: host

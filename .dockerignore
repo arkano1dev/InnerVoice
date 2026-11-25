@@ -1,0 +1,5 @@
+*
+!bot/
+bot/*
+!bot/requirements-bot.txt
+!bot/bot.py

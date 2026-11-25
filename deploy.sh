@@ -1,25 +1,13 @@
-#!/bin/bash
-# InnerVoice deployment script
-set -e
-
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
 case "${1:-up}" in
-  up)
-    docker compose up -d --build
-    ;;
-  down)
-    docker compose down
-    ;;
+  up) exec ./bin/innervoice start ;;
+  down) exec ./bin/innervoice stop ;;
   up-bot)
-    docker compose up -d --build bot
-    ;;
-  up-whisper)
-    docker compose up -d --build whisper
-    ;;
-  logs)
-    docker compose logs -f "${2:-}"
-    ;;
-  *)
-    echo "Usage: $0 {up|down|up-bot|up-whisper|logs [service]}"
-    exit 1
-    ;;
+    ./bin/innervoice config set deployment.telegram=true
+    exec ./bin/innervoice restart ;;
+  up-whisper) exec ./bin/innervoice worker-only ;;
+  logs) shift; exec ./bin/innervoice logs "$@" ;;
+  *) echo "Usage: $0 {up|down|up-bot|up-whisper|logs [service]}" >&2; exit 2 ;;
 esac

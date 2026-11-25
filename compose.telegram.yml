@@ -1,0 +1,35 @@
+networks:
+  BotEgress:
+    driver_opts:
+      com.docker.network.bridge.name: iv-telegram0
+services:
+  gateway:
+    environment:
+      IV_TELEGRAM: "1"
+    volumes:
+      - "${IV_SOCKET_DIR:?}:/run/telegram-socket"
+      - "${IV_BEARER_FILE:?}:/run/telegram/bearer:ro"
+  bot:
+    build: ./bot
+    restart: unless-stopped
+    depends_on: [gateway]
+    networks: [BotEgress]
+    user: "${IV_UID:?}:${IV_GID:?}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ulimits:
+      core: 0
+    mem_limit: 768m
+    pids_limit: 96
+    tmpfs:
+      - "/app/audios:size=256m,mode=0700,uid=${IV_UID:?},gid=${IV_GID:?}"
+      - "/tmp:size=64m,mode=1777"
+    environment:
+      BOT_TOKEN: "${BOT_TOKEN:?Set the Telegram token}"
+      TELEGRAM_USER_ID: "${TELEGRAM_USER_ID:?Set the authorized Telegram user ID}"
+      INNERVOICE_BOT_DEFAULTS: "${IV_BOT:?}"
+      WHISPER_API_URL: http://localhost
+    volumes:
+      - "${IV_SOCKET_DIR:?}:/run/telegram-socket:ro"
+      - "${IV_BEARER_FILE:?}:/run/telegram/bearer:ro"

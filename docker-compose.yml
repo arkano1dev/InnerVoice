@@ -1,23 +1,54 @@
 networks:
-  TelegramNet:
+  IngressNet:
     driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: iv-gateway0
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+
+  InferenceNet:
+    internal: true
 
 services:
+  gateway:
+    user: "${IV_UID:?Use bin/innervoice}:${IV_GID:?}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ulimits:
+      core: 0
+    tmpfs:
+      - "/tmp:size=${IV_RAM_MIB:-1088}m,mode=0700,uid=${IV_UID:?},gid=${IV_GID:?}"
+    build:
+      context: ./gateway
+    restart: unless-stopped
+    depends_on:
+      - whisper
+    networks:
+      - IngressNet
+      - InferenceNet
+    environment:
+      - WHISPER_WORKER_URL=http://whisper:9000
+
   whisper:
     # GPU (AMD ROCm). Do not apply low block I/O limits: model load needs normal disk I/O.
-    # If Whisper exits 139 or restarts, see docs/GPU-TROUBLESHOOTING.md
+    # See docs/private-gateway.md for ROCm compatibility checks.
     build:
       context: ./whisper
       dockerfile: Dockerfile
     container_name: innervoice-whisper
     restart: unless-stopped
     networks:
-      - TelegramNet
-    ports:
-      - "9000:9000"
-    volumes:
-      - whisper_cache:/root/.cache
+      - InferenceNet
+    user: "${IV_UID:?}:${IV_GID:?}"
+    cap_drop: [ALL]
+    read_only: true
+    ulimits:
+      core: 0
+    tmpfs:
+      - "/tmp:size=1024m,mode=1777"
     environment:
+      - HOME=/tmp
+      - XDG_CACHE_HOME=/tmp/cache
       - WHISPER_MODEL=medium
       - WHISPER_FP16=true
       - WHISPER_BEAM_SIZE=1
@@ -26,7 +57,7 @@ services:
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       - VRAM_THRESHOLD_FREE_MB=1536
       - ROCR_VISIBLE_DEVICES=0
-      - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      - HSA_OVERRIDE_GFX_VERSION
     # Mark this container as low-priority for the kernel OOM killer
     oom_score_adj: 1000
     deploy:
@@ -35,43 +66,10 @@ services:
           memory: 5G
           cpus: "4"
     security_opt:
-      - seccomp:unconfined
-    cap_add:
-      - SYS_PTRACE
-    ipc: host
+      - no-new-privileges:true
     shm_size: "2g"
     devices:
       - /dev/kfd
-      - /dev/dri
+      - "${IV_RENDER_NODE:-/dev/dri/renderD128}:${IV_RENDER_NODE:-/dev/dri/renderD128}"
     group_add:
-      - video
-      - render
-
-  bot:
-    build:
-      context: ./bot
-      dockerfile: Dockerfile
-    container_name: innervoice-bot
-    restart: unless-stopped
-    depends_on:
-      - whisper
-    networks:
-      - TelegramNet
-    volumes:
-      - ./.env:/app/.env:ro
-      - audio_temp:/app/audios
-    environment:
-      - BOT_TOKEN=${BOT_TOKEN}
-      - WHISPER_API_URL=http://whisper:9000
-      - TZ=UTC
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
-
-volumes:
-  audio_temp:
-    driver: local
-  whisper_cache:
-    driver: local
+      - "${WHISPER_RENDER_GROUP:-render}"

@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import subprocess
+import uuid
+import math
 import time
 import tiktoken
 import aiohttp
@@ -11,7 +13,6 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
-from dotenv import load_dotenv
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from contextlib import suppress
@@ -21,9 +22,18 @@ from collections import defaultdict
 logging.basicConfig(level=logging.INFO)
 
 # Load environment variables
-load_dotenv()
+os.umask(0o077)
 TOKEN = os.getenv("BOT_TOKEN")
-WHISPER_API_URL = os.getenv("WHISPER_API_URL", "http://whisper:9000")
+WHISPER_API_URL = os.environ["WHISPER_API_URL"]
+AUTHORIZED_USER = int(os.environ["TELEGRAM_USER_ID"])
+if AUTHORIZED_USER <= 0:
+    raise ValueError("Configure one positive Telegram user ID")
+GATEWAY_BEARER = Path("/run/telegram/bearer").read_text().strip()
+if len(GATEWAY_BEARER) < 32:
+    raise ValueError("Missing bot gateway credential")
+MAX_BYTES = 16 * 1024**2
+MAX_SECONDS = 600
+MAX_NOTES = 4
 
 # Adjust these constants
 TELEGRAM_TIMEOUT = 200
@@ -40,13 +50,16 @@ bot = Bot(
     connect_timeout=TELEGRAM_TIMEOUT,
 )
 dp = Dispatcher()
+dp.message.filter(F.from_user.id == AUTHORIZED_USER, F.chat.type == "private")
+dp.callback_query.filter(F.from_user.id == AUTHORIZED_USER)
+
 
 # Directories and logging configuration
 AUDIO_DIR = "audios"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
 # Queue to process audios in order
-audio_queue = asyncio.Queue()
+audio_queue = asyncio.Queue(maxsize=MAX_NOTES)
 
 # Duplicate guard: (user_id, file_id) -> timestamp of last processing
 last_processed: Dict[Tuple[int, str], float] = {}
@@ -77,16 +90,32 @@ PROCESSING_MODES = {
     "full": {"name": "Full Mode", "icon": "📝", "description": "Original + English translation"},
 }
 
-# User preferences - default Spanish for immediate first-audio flow
-user_preferences = defaultdict(
-    lambda: {
-        "language": "es",
-        "mode": "full",
-        "show_stats": True,
-        "timestamps": False,
-        "ui_language": "es",  # Default Spanish - no blocking language selection
-    }
-)
+# Store only explicit overrides, so deployment defaults continue to apply.
+defaults = dict(language="es",mode="full",show_stats=True,timestamps=False,ui_language="es")
+defaults.update(json.loads(os.getenv("INNERVOICE_BOT_DEFAULTS","{}")))
+overrides = {}
+preference_lock = asyncio.Lock()
+
+
+def preferences(user_id):
+    return {**defaults, **overrides}
+
+
+async def sync_preferences(changes=None):
+    async with preference_lock, gateway_session() as session:
+        async with session.request("GET" if changes is None else "PATCH",
+                                   WHISPER_API_URL + "/preferences", json=changes,
+                                   allow_redirects=False, timeout=aiohttp.ClientTimeout(total=5)) as result:
+            result.raise_for_status()
+            saved = await result.json()
+        overrides.clear()
+        overrides.update(saved)
+
+
+async def set_preference(user_id, key=None, value=None):
+    await sync_preferences({key: value} if key else {})
+
+
 
 # UI Text translations
 UI_TEXTS = {
@@ -152,7 +181,7 @@ progress_messages: Dict[str, int] = {}
 
 def get_text(user_id: int, key: str) -> str:
     """Get translated text for user's UI language."""
-    ui_lang = user_preferences[user_id].get("ui_language", "es")
+    ui_lang = preferences(user_id).get("ui_language", "es")
     if ui_lang not in UI_TEXTS:
         ui_lang = "es"
     return UI_TEXTS[ui_lang].get(key, key)
@@ -188,9 +217,10 @@ def load_pending_queue() -> None:
                 file_id = item[1]
                 file_path = item[2]
                 business_connection_id = item[3] if len(item) > 3 else None
-                pending_list.append((user_id, file_id, file_path, business_connection_id))
+                prefs = item[4] if len(item)>4 else preferences(user_id)
+                pending_list.append((user_id, file_id, file_path, business_connection_id, prefs))
     except Exception as e:
-        logging.warning("Could not load pending queue: %s", e)
+        logging.warning("Could not load pending queue: %s", type(e).__name__)
 
 
 def save_pending_queue() -> None:
@@ -198,11 +228,11 @@ def save_pending_queue() -> None:
     try:
         out = []
         for t in pending_list:
-            out.append([t[0], t[1], t[2], t[3]])  # JSON allows null for None
+            out.append(list(t))  # JSON allows null for None
         with open(PENDING_QUEUE_PATH, "w") as f:
             json.dump(out, f)
     except Exception as e:
-        logging.warning("Could not save pending queue: %s", e)
+        logging.warning("Could not save pending queue: %s", type(e).__name__)
 
 
 def create_language_keyboard() -> InlineKeyboardMarkup:
@@ -230,7 +260,7 @@ def create_mode_keyboard() -> InlineKeyboardMarkup:
 
 def create_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Create settings keyboard showing current preferences."""
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     lang_info = SUPPORTED_LANGUAGES[prefs["language"]]
     mode_info = PROCESSING_MODES[prefs["mode"]]
     ui_lang = prefs.get("ui_language", "es")
@@ -242,6 +272,7 @@ def create_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"UI: {ui_lang_label}", callback_data="change_ui_lang")],
         [InlineKeyboardButton(text=f"Stats: {'✅' if prefs['show_stats'] else '❌'}", callback_data="toggle_stats")],
         [InlineKeyboardButton(text=f"Timestamps: {'✅' if prefs['timestamps'] else '❌'}", callback_data="toggle_timestamps")],
+        [InlineKeyboardButton(text="Restore defaults / Restaurar valores",callback_data="restore_defaults")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -260,18 +291,25 @@ class WhisperBusyError(Exception):
     pass
 
 
+def gateway_session():
+    return aiohttp.ClientSession(
+        connector=aiohttp.UnixConnector(path="/run/telegram-socket/gateway.sock"),
+        headers={"Authorization": "Bearer " + GATEWAY_BEARER},
+    )
+
+
 async def fetch_whisper_health() -> Optional[dict]:
     """Fetch Whisper /health for GPU stats."""
     try:
-        async with aiohttp.ClientSession() as session:
+        async with gateway_session() as session:
             async with session.get(
                 f"{WHISPER_API_URL.rstrip('/')}/health",
-                timeout=aiohttp.ClientTimeout(total=5),
+                allow_redirects=False, timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status == 200:
                     return await resp.json()
     except Exception as e:
-        logging.debug(f"Could not fetch Whisper health: {e}")
+        logging.debug(f"Could not fetch Whisper health: {type(e).__name__}")
     return None
 
 
@@ -281,7 +319,7 @@ async def fetch_whisper_health() -> Optional[dict]:
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     user_id = message.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     ui_lang = prefs.get("ui_language", "es")
 
     if ui_lang == "es":
@@ -327,7 +365,7 @@ async def start_handler(message: types.Message):
 @dp.message(Command("help"))
 async def help_handler(message: types.Message):
     user_id = message.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     lang_info = SUPPORTED_LANGUAGES[prefs["language"]]
     mode_info = PROCESSING_MODES[prefs["mode"]]
     ui_lang = prefs.get("ui_language", "es")
@@ -383,7 +421,7 @@ async def help_handler(message: types.Message):
 @dp.message(Command("about"))
 async def about_handler(message: types.Message):
     user_id = message.from_user.id
-    ui_lang = user_preferences[user_id].get("ui_language", "es")
+    ui_lang = preferences(user_id).get("ui_language", "es")
 
     if ui_lang == "es":
         await message.answer(
@@ -406,7 +444,7 @@ async def about_handler(message: types.Message):
 @dp.message(Command("settings"))
 async def settings_handler(message: types.Message):
     user_id = message.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     ui_lang = prefs.get("ui_language", "es")
 
     msg = (
@@ -420,7 +458,7 @@ async def settings_handler(message: types.Message):
 @dp.message(Command("lang"))
 async def lang_handler(message: types.Message):
     user_id = message.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     ui_lang = prefs.get("ui_language", "es")
     current_lang_info = SUPPORTED_LANGUAGES[prefs["language"]]
 
@@ -434,7 +472,7 @@ async def lang_handler(message: types.Message):
 @dp.message(Command("mode"))
 async def mode_handler(message: types.Message):
     user_id = message.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     mode_info = PROCESSING_MODES[prefs["mode"]]
     ui_lang = prefs.get("ui_language", "es")
 
@@ -448,12 +486,20 @@ async def mode_handler(message: types.Message):
 # --- Callback handlers ---
 
 
+@dp.callback_query(lambda c: c.data == "restore_defaults")
+async def restore_defaults(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    await set_preference(user_id)
+    await callback_query.message.edit_reply_markup(reply_markup=create_settings_keyboard(user_id))
+    await callback_query.answer()
+
+
 @dp.callback_query(lambda c: c.data and c.data.startswith("ui_lang_"))
 async def process_ui_language_callback(callback_query: types.CallbackQuery):
     lang_code = callback_query.data.split("_")[2]
     user_id = callback_query.from_user.id
     if lang_code in ("es", "en"):
-        user_preferences[user_id]["ui_language"] = lang_code
+        await set_preference(user_id,"ui_language",lang_code)
         msg = "✅ Idioma configurado a Español!" if lang_code == "es" else "✅ Language set to English!"
         await callback_query.message.edit_text(msg, parse_mode="HTML")
     await callback_query.answer()
@@ -462,7 +508,7 @@ async def process_ui_language_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data and c.data.startswith("change_ui_lang"))
 async def change_ui_lang_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     ui_lang = prefs.get("ui_language", "es")
     msg = "Selecciona idioma de interfaz:" if ui_lang == "es" else "Select UI language:"
     await callback_query.message.edit_text(msg, reply_markup=create_ui_language_keyboard(), parse_mode="HTML")
@@ -474,7 +520,7 @@ async def process_language_callback(callback_query: types.CallbackQuery):
     lang_code = callback_query.data.split("_")[1]
     user_id = callback_query.from_user.id
     if lang_code in SUPPORTED_LANGUAGES:
-        user_preferences[user_id]["language"] = lang_code
+        await set_preference(user_id,"language",lang_code)
         lang_info = SUPPORTED_LANGUAGES[lang_code]
         await callback_query.message.edit_text(
             f"✅ {lang_info['flag']} {lang_info['name']}\n🎙️ ¡Envía un mensaje de voz!",
@@ -488,7 +534,7 @@ async def process_mode_callback(callback_query: types.CallbackQuery):
     mode = callback_query.data.split("_")[1]
     user_id = callback_query.from_user.id
     if mode in PROCESSING_MODES:
-        user_preferences[user_id]["mode"] = mode
+        await set_preference(user_id,"mode",mode)
         mode_info = PROCESSING_MODES[mode]
         await callback_query.message.edit_text(f"✅ {mode_info['icon']} {mode_info['name']}\n🎙️ Ready!", parse_mode="HTML")
     await callback_query.answer()
@@ -497,7 +543,7 @@ async def process_mode_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "change_lang")
 async def change_lang_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     current_lang_info = SUPPORTED_LANGUAGES[prefs["language"]]
     await callback_query.message.edit_text(
         f"🌐 Actual: {current_lang_info['flag']} {current_lang_info['name']}\n👇 Select:",
@@ -510,7 +556,7 @@ async def change_lang_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "change_mode")
 async def change_mode_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
     mode_info = PROCESSING_MODES[prefs["mode"]]
     await callback_query.message.edit_text(
         f"⚡ Actual: {mode_info['icon']} {mode_info['name']}\n👇 Select:",
@@ -523,7 +569,7 @@ async def change_mode_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "toggle_stats")
 async def toggle_stats_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    user_preferences[user_id]["show_stats"] = not user_preferences[user_id]["show_stats"]
+    await set_preference(user_id,"show_stats",not preferences(user_id)["show_stats"])
     await callback_query.message.edit_reply_markup(reply_markup=create_settings_keyboard(user_id))
     await callback_query.answer()
 
@@ -531,7 +577,7 @@ async def toggle_stats_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "toggle_timestamps")
 async def toggle_timestamps_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-    user_preferences[user_id]["timestamps"] = not user_preferences[user_id]["timestamps"]
+    await set_preference(user_id,"timestamps",not preferences(user_id)["timestamps"])
     await callback_query.message.edit_reply_markup(reply_markup=create_settings_keyboard(user_id))
     await callback_query.answer()
 
@@ -560,7 +606,7 @@ async def retry_callback(callback_query: types.CallbackQuery):
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
     user_id = message.from_user.id
-    prefs = user_preferences[user_id]
+    prefs = preferences(user_id)
 
     # Duplicate guard: same (user_id, file_id) within 60s = skip
     file_id = message.voice.file_id
@@ -571,14 +617,31 @@ async def handle_voice(message: types.Message):
         await message.answer(get_text(user_id, "duplicate_skipped"), parse_mode="HTML")
         return
 
-    voice = await bot.download(message.voice)
-    file_path = os.path.join(AUDIO_DIR, f"{file_id}.ogg")
-    with open(file_path, "wb") as f:
-        f.write(voice.read())
+    if not (0 < (message.voice.file_size or 0) <= MAX_BYTES and 0 < message.voice.duration <= MAX_SECONDS):
+        await message.answer("Voice note exceeds the configured limits.")
+        return
+    if len(list(Path(AUDIO_DIR).glob("*.ogg"))) >= MAX_NOTES:
+        await message.answer("The voice queue is full. Try again later.")
+        return
+    path = Path(AUDIO_DIR) / (uuid.uuid4().hex + ".ogg")
+    try:
+        # Count actual downloaded bytes as well as Telegram metadata.
+        class LimitedWriter:
+            def write(self, block):
+                if stream.tell() + len(block) > MAX_BYTES:
+                    raise ValueError("Voice note exceeds byte limit")
+                return stream.write(block)
 
-    # Telegram API expects business_connection_id as string when editing messages in business context
-    business_connection_id = getattr(message, "business_connection_id", None)
-    await audio_queue.put((user_id, file_id, file_path, business_connection_id))
+            def flush(self):
+                stream.flush()
+
+        with path.open("xb") as stream:
+            await bot.download(message.voice, destination=LimitedWriter(), seek=False, timeout=60)
+        business = getattr(message, "business_connection_id", None)
+        audio_queue.put_nowait((user_id, file_id, str(path), business, prefs))
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 # --- Helpers ---
@@ -611,7 +674,7 @@ async def send_message_safe(
             )
             return msg
         except Exception as e:
-            logging.error(f"Error sending message (attempt {attempt + 1}/3): {e}")
+            logging.error(f"Error sending message (attempt {attempt + 1}/3): {type(e).__name__}")
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
     return None
@@ -722,7 +785,7 @@ async def update_progress(
             kwargs["business_connection_id"] = str(business_connection_id)
         await bot.edit_message_text(**kwargs)
     except Exception as e:
-        logging.error(f"Error updating progress: {e}")
+        logging.error(f"Error updating progress: {type(e).__name__}")
 
 
 def count_tokens(text: str) -> int:
@@ -741,18 +804,19 @@ async def _call_whisper_api(
 ) -> dict:
     """Call Whisper API for transcription. Raises WhisperBusyError on 503. Retries on 5xx/connection errors."""
     url = f"{WHISPER_API_URL.rstrip('/')}/transcribe"
-    data = aiohttp.FormData()
-    data.add_field("task", task)
-    data.add_field("return_segments", str(return_segments).lower())
-    if language:
-        data.add_field("language", language)
-    data.add_field("audio", segment_path.read_bytes(), filename=segment_path.name, content_type="audio/wav")
+
 
     last_error = None
     for attempt in range(WHISPER_RETRIES + 1):
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=WHISPER_TIMEOUT)) as resp:
+            data = aiohttp.FormData()
+            data.add_field("task", task)
+            data.add_field("return_segments", str(return_segments).lower())
+            if language:
+                data.add_field("language", language)
+            data.add_field("audio", segment_path.read_bytes(), filename=segment_path.name, content_type="audio/wav")
+            async with gateway_session() as session:
+                async with session.post(url, data=data, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=WHISPER_TIMEOUT)) as resp:
                     if resp.status == 503:
                         try:
                             body = await resp.json()
@@ -790,7 +854,7 @@ async def _call_whisper_api(
         except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as e:
             last_error = e
             if attempt < WHISPER_RETRIES:
-                logging.warning("Whisper request failed (attempt %s/%s), retrying: %s", attempt + 1, WHISPER_RETRIES + 1, e)
+                logging.warning("Whisper request failed (attempt %s/%s), retrying: %s", attempt + 1, WHISPER_RETRIES + 1, type(e).__name__)
                 await asyncio.sleep(3 * (attempt + 1))
             else:
                 raise
@@ -807,29 +871,32 @@ async def process_audio_chunk(
 
 
 async def process_audio_async(
-    user_id: int, file_id: str, file_path: str, business_connection_id=None
+    user_id: int, file_id: str, file_path: str, business_connection_id=None, prefs=None
 ):
     """Main audio processing with Whisper API."""
     wav_path = Path(file_path).with_suffix(".wav")
-    prefs = user_preferences[user_id]
+    prefs = prefs or preferences(user_id)
     progress_msg_id = None
     queued_for_later = False  # when True, do not delete file_path in finally (pending worker will process it)
 
     try:
         duration_result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
-            capture_output=True,
+            ["ffprobe", "-protocol_whitelist", "file,pipe", "-f", "ogg", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+            capture_output=True, timeout=15,
             text=True,
         )
         duration = float(duration_result.stdout.strip()) if duration_result.returncode == 0 else 0
+
+        if not math.isfinite(duration) or not 0 < duration <= MAX_SECONDS:
+            raise ValueError("Invalid voice duration")
 
         if not Path(file_path).exists():
             await send_message_safe(user_id, "❌ Audio file not found.")
             return
 
         subprocess.run(
-            ["ffmpeg", "-i", file_path, "-ac", "1", "-ar", "16000", "-sample_fmt", "s16", str(wav_path), "-y"],
-            check=True,
+            ["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", "ogg", "-i", file_path, "-t", str(MAX_SECONDS), "-ac", "1", "-ar", "16000", "-sample_fmt", "s16", str(wav_path), "-y"],
+            timeout=60, check=True,
             capture_output=True,
         )
 
@@ -899,13 +966,13 @@ async def process_audio_async(
                 gpu_busy_raised = True
                 break  # will add to pending below and skip cleanup
             except Exception as e:
-                logging.error(f"Error processing segment {i}/{len(segments)}: {e}")
+                logging.error(f"Error processing segment {i}/{len(segments)}: {type(e).__name__}")
             finally:
                 if segment != wav_path:
                     Path(segment).unlink(missing_ok=True)
 
         if gpu_busy_raised:
-            pending_list.append((user_id, file_id, file_path, business_connection_id))
+            pending_list.append((user_id, file_id, file_path, business_connection_id, prefs))
             save_pending_queue()
             if wav_path.exists():
                 wav_path.unlink(missing_ok=True)
@@ -939,7 +1006,7 @@ async def process_audio_async(
                     edit_kwargs["business_connection_id"] = str(business_connection_id)
                 await bot.edit_message_text(**edit_kwargs)
             except Exception as e:
-                logging.error(f"Error updating final status: {e}")
+                logging.error(f"Error updating final status: {type(e).__name__}")
 
         def format_with_timestamps(text, segs):
             if not segs:
@@ -987,7 +1054,7 @@ async def process_audio_async(
             await send_message_safe(user_id, stats_msg, parse_mode="HTML")
 
     except WhisperBusyError:
-        pending_list.append((user_id, file_id, file_path, business_connection_id))
+        pending_list.append((user_id, file_id, file_path, business_connection_id, prefs))
         save_pending_queue()
         if wav_path.exists():
             wav_path.unlink(missing_ok=True)
@@ -1000,13 +1067,15 @@ async def process_audio_async(
         queued_for_later = True
         return
     except Exception as e:
-        logging.error(f"Error processing audio {file_id}: {e}")
+        logging.error("Audio processing failed (%s)", type(e).__name__)
         await send_message_safe(
             user_id,
             get_text(user_id, "transcription_failed"),
             parse_mode="HTML",
         )
     finally:
+        for part in wav_path.parent.glob(wav_path.stem + "_part*.wav"):
+            part.unlink(missing_ok=True)
         if not queued_for_later:
             Path(file_path).unlink(missing_ok=True)
             if wav_path.exists():
@@ -1021,8 +1090,8 @@ async def split_audio(wav_path: Path) -> List[Path]:
     segments = []
     output_template = str(wav_path.with_name(f"{wav_path.stem}_part%d{wav_path.suffix}"))
     subprocess.run(
-        ["ffmpeg", "-i", str(wav_path), "-f", "segment", "-segment_time", str(CHUNK_SIZE_SECONDS), "-c", "copy", output_template],
-        check=True,
+        ["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", "wav", "-i", str(wav_path), "-f", "segment", "-segment_time", str(CHUNK_SIZE_SECONDS), "-c", "copy", output_template],
+        timeout=60, check=True,
         capture_output=True,
     )
     index = 0
@@ -1039,11 +1108,11 @@ async def can_whisper_transcribe() -> bool:
     """Return True if Whisper reports enough VRAM to accept a transcribe request."""
     try:
         url = f"{WHISPER_API_URL.rstrip('/')}/can-transcribe"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with gateway_session() as session:
+            async with session.get(url, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 return resp.status == 200
     except Exception as e:
-        logging.debug("can-transcribe check failed: %s", e)
+        logging.debug("can-transcribe check failed: %s", type(e).__name__)
         return False
 
 
@@ -1058,43 +1127,44 @@ async def pending_worker():
                 continue
             item = pending_list.pop(0)
             save_pending_queue()
-            user_id, file_id, file_path, business_connection_id = item
+            user_id, file_id, file_path, business_connection_id, prefs = item
             if not Path(file_path).exists():
-                logging.warning("Pending audio file no longer exists: %s", file_path)
+                logging.warning("Pending audio is unavailable")
                 continue
-            await audio_queue.put((user_id, file_id, file_path, business_connection_id))
-            logging.info("Moved queued audio %s to main queue (VRAM free)", file_id)
+            await audio_queue.put((user_id, file_id, file_path, business_connection_id, prefs))
+            logging.info("Resumed queued audio")
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logging.error("Error in pending worker: %s", e)
+            logging.error("Error in pending worker: %s", type(e).__name__)
 
 
 async def audio_worker():
     while True:
         try:
             item = await audio_queue.get()
-            # Support both (user_id, file_id, file_path) and (user_id, file_id, file_path, business_connection_id)
-            if len(item) == 4:
-                user_id, file_id, file_path, business_connection_id = item
-            else:
-                user_id, file_id, file_path = item
-                business_connection_id = None
-            await process_audio_async(user_id, file_id, file_path, business_connection_id)
+            await process_audio_async(*item)
         except Exception as e:
-            logging.error(f"Error in audio worker: {e}")
+            logging.error(f"Error in audio worker: {type(e).__name__}")
             await asyncio.sleep(1)
 
 
 async def main():
+    if os.getuid() == 0 or os.getgid() == 0:
+        raise RuntimeError("The bot requires a non-root identity")
+    with open("/proc/swaps") as swaps, open("/proc/self/mountinfo") as mounts:
+        volatile = {line.split()[4] for line in mounts if line.split(" - ")[1].startswith("tmpfs ")}
+        if len(swaps.readlines()) > 1 or not {"/tmp", str(Path(AUDIO_DIR).resolve())} <= volatile:
+            raise RuntimeError("The bot requires swap disabled and RAM-backed audio directories")
     load_pending_queue()
     while True:
         audio_worker_task = asyncio.create_task(audio_worker())
         pending_worker_task = asyncio.create_task(pending_worker())
         try:
+            await sync_preferences()
             await dp.start_polling(bot)
         except Exception as e:
-            logging.error(f"Polling error: {e}")
+            logging.error(f"Polling error: {type(e).__name__}")
             await asyncio.sleep(5)
         finally:
             if not audio_worker_task.done():

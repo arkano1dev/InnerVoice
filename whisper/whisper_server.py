@@ -13,6 +13,36 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 model_size = os.getenv("WHISPER_MODEL", "medium")
+engine = os.environ.get("WHISPER_ENGINE", "openai-whisper")
+device = os.getenv("WHISPER_DEVICE","cuda")
+weights = os.environ.get("WHISPER_LOCAL_WEIGHTS")
+if not weights or not os.path.exists(weights):
+    raise ValueError("Mount a trusted local model and configure WHISPER_LOCAL_WEIGHTS")
+if os.getuid() == 0 or os.getgid() == 0:
+    raise RuntimeError("Private inference requires a non-root identity")
+with open("/proc/swaps") as swaps, open("/proc/self/mountinfo") as mounts:
+    if len(swaps.readlines()) > 1 or not any(
+        row.split()[4] == "/tmp" and row.split(" - ")[1].startswith("tmpfs ") for row in mounts
+    ):
+        raise RuntimeError("Private inference requires RAM-backed temporary storage and swap disabled")
+tempfile.tempdir = "/tmp"
+if model_size.endswith(".en") or "turbo" in model_size:
+    raise ValueError("Selected weights must support speech-to-English translation")
+
+
+class FasterEngine:
+    def __init__(self):
+        from faster_whisper import WhisperModel
+        self.model = WhisperModel(weights, device="cuda", compute_type="float16", local_files_only=True)
+
+    def transcribe(self, audio, **options):
+        parts, _ = self.model.transcribe(audio, task=options["task"], language=options["language"],
+                                         beam_size=options["beam_size"], temperature=0,
+                                         condition_on_previous_text=options["condition_on_previous_text"])
+        segments = [dict(start=p.start,end=p.end,text=p.text) for p in parts]
+        return dict(text="".join(p["text"] for p in segments),segments=segments)
+
+
 VRAM_THRESHOLD_FREE_MB = int(os.getenv("VRAM_THRESHOLD_FREE_MB", "2048"))
 MODEL_PRELOAD = os.getenv("MODEL_PRELOAD", "false").lower() in ("1", "true", "yes")
 USE_FP16 = os.getenv("WHISPER_FP16", "true").lower() in ("1", "true", "yes")  # fp16 reduces VRAM for medium
@@ -29,6 +59,7 @@ _model = None
 _model_load_error = None
 _last_used_monotonic = None
 _model_lock = threading.Lock()
+_inference_slot = threading.Lock()
 
 
 def _probe_gpu():
@@ -68,9 +99,8 @@ def get_model():
                 ) from _model_load_error
 
         try:
-            import whisper
             logger.info("Loading Whisper model %s (first request or after idle unload)...", model_size)
-            gpu = _probe_gpu()
+            gpu = _probe_gpu() if device=="cuda" else {"available":True}
             if not gpu.get("available"):
                 err = gpu.get("error", "GPU not available")
                 raise RuntimeError(f"Cannot load model: {err}. Check ROCm/iGPU setup.")
@@ -84,8 +114,14 @@ def get_model():
                     "Try again when other GPU workloads are idle."
                 )
 
-            _model = whisper.load_model(model_size, device="cuda")
-            if USE_TORCH_COMPILE:
+            if engine == "openai-whisper":
+                import whisper
+                _model = whisper.load_model(weights, device=device)
+            elif engine == "faster-whisper" and weights:
+                _model = FasterEngine()
+            else:
+                raise RuntimeError("Unsupported engine configuration")
+            if engine == "openai-whisper" and device=="cuda" and USE_TORCH_COMPILE:
                 try:
                     import torch
                     _model = torch.compile(_model, mode="reduce-overhead")
@@ -166,7 +202,23 @@ def _gpu_cache_clear():
 
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
-    """Transcribe or translate audio. Accepts audio file + optional params: language, task, return_segments."""
+    """Claim the single model slot before accepting an inference request."""
+    global _last_used_monotonic
+    if not _inference_slot.acquire(blocking=False):
+        return jsonify(error="gpu_busy", message="Whisper is processing audio. Try again when free."), 503
+    try:
+        return _transcribe()
+    finally:
+        if _model is not None:
+            _last_used_monotonic = time.monotonic()
+        _inference_slot.release()
+
+
+def _transcribe():
+    """Accept an audio file and legacy task, language and timestamp options."""
+    profile=request.headers.get("X-Dispatch-Profile")
+    if profile and profile!=os.environ.get("PROFILE_REVISION"):
+        return jsonify(error="profile_mismatch"),409
     if "audio" not in request.files:
         return jsonify({"error": "No audio file"}), 400
 
@@ -194,7 +246,7 @@ def transcribe():
             result = get_model().transcribe(
                 tmp.name,
                 task=task,
-                fp16=USE_FP16,
+                fp16=USE_FP16 and device=="cuda",
                 language=language if language else None,
                 verbose=False,
                 beam_size=BEAM_SIZE,
@@ -202,7 +254,7 @@ def transcribe():
                 temperature=(0.0,),  # single temp avoids fallback loops
             )
         except Exception as e:
-            logger.error(f"Transcription error: {e}")
+            logger.error("Transcription failed (%s)", type(e).__name__)
             _gpu_cache_clear()
             err_str = str(e).lower()
             # Return 503 so clients can queue and retry when VRAM is free (same UX for busy and OOM)
@@ -222,7 +274,7 @@ def transcribe():
                     }),
                     503,
                 )
-            return jsonify({"error": str(e)}), 500
+            return jsonify({"error": "inference_failed"}), 500
         finally:
             try:
                 os.unlink(tmp.name)
@@ -234,14 +286,19 @@ def transcribe():
     out = {"text": result.get("text", "").strip()}
     if return_segments and "segments" in result:
         out["segments"] = result["segments"]
-    return jsonify(out)
+    response=jsonify(out)
+    if request.headers.get("X-Dispatch-Token"):
+        for key in ("Job","Index","Token","Profile"):
+            header="X-Dispatch-"+key
+            response.headers[header]=request.headers.get(header,"")
+    return response
 
 
 @app.route("/can-transcribe", methods=["GET"])
 def can_transcribe():
     """Check if GPU has enough free VRAM to accept a transcribe request (without loading the model).
     Bot uses this to know when to process the pending queue."""
-    if check_vram_available():
+    if not _inference_slot.locked() and check_vram_available():
         return jsonify({"can_transcribe": True}), 200
     return (
         jsonify({"can_transcribe": False, "message": "GPU/VRAM busy. Try again when free."}),
@@ -252,7 +309,7 @@ def can_transcribe():
 @app.route("/health", methods=["GET"])
 def health():
     """Health check with optional GPU/VRAM stats (only after model loaded to avoid GPU init at startup)."""
-    resp = {"status": "healthy", "model": model_size}
+    resp = {"status": "healthy", "model": model_size, "engine": engine, "profile":os.getenv("PROFILE_REVISION")}
     if _model is not None:
         used_mb, total_mb = get_vram_stats()
         if used_mb is not None and total_mb is not None:
@@ -297,7 +354,9 @@ def _unload_model_if_idle():
             if idle_for < IDLE_UNLOAD_SECONDS:
                 continue
 
-            with _model_lock:
+            if not _inference_slot.acquire(blocking=False):
+                continue
+            try:
                 if _model is None:
                     continue
                 if _last_used_monotonic is not None and (time.monotonic() - _last_used_monotonic) < IDLE_UNLOAD_SECONDS:
@@ -318,6 +377,8 @@ def _unload_model_if_idle():
                     logger.info("Whisper model successfully unloaded due to idle timeout")
                 except Exception as e:
                     logger.warning("Error while unloading idle Whisper model: %s", e)
+            finally:
+                _inference_slot.release()
         except Exception as e:
             logger.warning("Idle-unload watcher loop error: %s", e)
 
@@ -342,8 +403,8 @@ def _start_idle_unload_thread():
 
 
 # Start background housekeeping when the module is imported (works for Gunicorn and Flask dev server)
-_start_idle_unload_thread()
 _preload_model()
+_start_idle_unload_thread()
 
 
 if __name__ == "__main__":

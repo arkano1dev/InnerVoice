@@ -1,36 +1,19 @@
-# CPU-only version (default) - Faster build, no GPU needed
-FROM python:3.10-slim
-
-# For GPU support, uncomment the following and comment the line above:
-# FROM pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set working directory
+FROM cgr.dev/chainguard/wolfi-base AS runtime
+RUN apk add --no-cache ca-certificates python-3.13 ffmpeg-9.1
+ENV PATH=/opt/innervoice/bin:$PATH PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 
-# Copy requirements first to leverage Docker cache
-COPY requirements.txt .
+FROM runtime AS dependencies
+RUN apk add --no-cache py3.13-pip && python3.13 -m venv --without-pip /opt/innervoice
+COPY bot/requirements-bot.txt .
+RUN /usr/bin/python3.13 -m pip --python /opt/innervoice install --no-cache-dir -r requirements-bot.txt
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
+RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" && chmod -R a+rX /opt/tiktoken
 
-# Install Python dependencies (CPU-only - much faster!)
-RUN pip install --no-cache-dir -r requirements.txt
-
-# For GPU: If using GPU base image above, install with CUDA support:
-# RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu117
-# RUN pip install --no-cache-dir openai-whisper aiogram python-dotenv tiktoken
-
-# Copy the rest of the application
-COPY . .
-
-# Create directory for audio files
-RUN mkdir -p audios && \
-    chmod 777 audios
-
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-
-# Run the bot
+FROM runtime
+COPY --from=dependencies /opt/innervoice /opt/innervoice
+COPY --from=dependencies /opt/tiktoken /opt/tiktoken
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
+COPY bot/bot.py .
+USER 65534:65534
 CMD ["python", "bot.py"]

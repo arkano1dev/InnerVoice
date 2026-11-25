@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Ubuntu desktop recorder
+
+- The compact recorder opens with “Ready when you are” and expands for longer transcripts. It supports pause, playback, resume and copying edited text.
+- The history menu shows the ten latest local audio recordings. Audio survives transcription and restart. The default 2 GiB audio budget and previewable cleanup are managed with `innervoice-desktop storage`.
+
 ### Long audio handling
 - **Bot**: Increased Whisper request timeout and added retries for segment requests (5xx and connection errors) so long files (e.g. 15+ minutes) are more likely to complete after transient failures.
 - **Whisper**: Clear GPU cache after each transcription to reduce memory fragmentation when processing many segments in sequence.
@@ -516,14 +521,14 @@ Hello this is a test  ← Plain text, click to copy directly
 
 #### Option 1: Docker (Recommended)
 ```bash
-cd /home/as/InnerVoice
+cd InnerVoice
 docker-compose down
 docker-compose up -d --build
 ```
 
 #### Option 2: Direct Python
 ```bash
-cd /home/as/InnerVoice
+cd InnerVoice
 # Backup current version (already done: bot.py.backup, bot.py.bak)
 python bot.py
 ```

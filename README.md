@@ -1,238 +1,58 @@
 # InnerVoice
 
-**Version 3.0.0** - Privacy-First Voice Transcription Bot
+**Turn speech into text for the tools you already use.** InnerVoice is an open-source, self-hosted project powered by Whisper. Send a voice note to your agent or record on Ubuntu, then use the English text in your workflow. For example, you can speak an instruction in Spanish and have your agent receive it as an English prompt.
 
-InnerVoice is a Telegram bot that transcribes and translates voice messages using OpenAI's Whisper model. Built with [aiogram](https://docs.aiogram.dev), the bot runs as **two Docker containers**: a lightweight Telegram bot and a Whisper API service (Whisper on **AMD GPU via ROCm**). Send voice → get transcription + translation.
+## Choose how to use it
 
-## 📚 Documentation
+| I want to… | Use |
+| --- | --- |
+| Speak to my agent through Telegram | The agent's Telegram connector passes the note to the private Voice Gateway. The agent receives one final English result and handles the reply. See the [agent provider guide](docs/private-gateway.md#agent-connection) and [reference adapter](clients/provider.py). |
+| Get a transcript or translation in Telegram | The optional, single-user InnerVoice bot sends the result back in your Telegram chat. See the [bot guide](docs/private-gateway.md#server-audio-and-telegram) and [current bot source](bot/bot.py). |
+| Dictate into a desktop app | The optional Ubuntu client lets you start and stop with a shortcut, edit text as it arrives, and copy the result. The Docker client uses Wayland. Run the client [in Docker](docs/private-gateway.md#run-the-desktop-client-in-docker) or [directly on Ubuntu](docs/private-gateway.md#run-directly-on-ubuntu). |
 
-- **[DOCUMENTATION.md](DOCUMENTATION.md)** - Complete user & technical guide
-- **[CHANGELOG.md](CHANGELOG.md)** - Version history and changes
+The **Voice Gateway** accepts audio over private HTTPS, uses a shared Whisper worker and holds server-side audio in RAM while processing. An interrupted container can lose unfinished audio. The standalone bot uses a dedicated bearer and a local Unix socket. The desktop client saves audio on the workstation while you record. Pause, listen, and resume the same take, or reopen one of the ten most recent recordings from the clock.
 
-## Quick Start
+## Get started
 
-Run all commands from the **project root** (directory that contains `docker-compose.yml`).
+Follow [INSTALL.md](INSTALL.md) for a clean install, direct Meshnet access and the Ubuntu application launcher.
 
-```bash
-# Clone and go to project root
-git clone <repo-url> InnerVoice && cd InnerVoice
+1. **Set up the server.** You'll need Linux, Docker Compose, a private network endpoint and a local multilingual Whisper model. The setup wizard can create the TLS certificate. Follow [server provisioning](docs/private-gateway.md#provision-the-server).
+2. **Verify the Gateway directly.** Run `./bin/innervoice start --setup` to configure and start it. Follow the [CLI quickstart](docs/private-gateway.md#gateway-quickstart). Run the [direct smoke check](docs/private-gateway.md#direct-smoke-first) with a short synthetic audio fixture.
+3. **Connect one client.** Follow the setup guide for your [agent](docs/private-gateway.md#agent-connection), [standalone bot](docs/private-gateway.md#server-audio-and-telegram) or [Ubuntu desktop](docs/private-gateway.md#desktop-role).
 
-# Configure your bot token in .env
-echo "BOT_TOKEN=your_token_here" > .env
+The private Gateway and full-file agent integration are **Release A**. The desktop recorder and incremental session API are **Release B**. Deployment acceptance is pending. Release B also requires checks in a graphical Ubuntu session after Release A is accepted.
 
-# Start both containers (Whisper + Bot)
-make up
-# or: docker compose up -d --build
+## Everyday use
 
-# Test: Send /start to your bot in Telegram, then a voice message
-```
+| From | Action |
+| --- | --- |
+| Server | Run `./bin/innervoice config worker` to choose Whisper settings, then `./bin/innervoice restart` to apply them with the saved connection. |
+| Ubuntu workstation | Run `./bin/innervoice-desktop power` to turn dictation on or off. Press the configured shortcut to record, press again to finish, then paste the copied text wherever you need it. |
+| Desktop storage | Run `./bin/innervoice-desktop storage` to see the folder, usage and 2 GiB default audio limit. See the [desktop guide](docs/private-gateway.md#desktop-role) to change the limit or preview cleanup. |
+| Agent host | Run `./bin/innervoice agent setup` once with its own jobs credential. Point the STT provider at the saved client settings. |
 
-**GPU (ROCm):** Default is AMD GPU (`rocm/pytorch:latest`, medium model, Gunicorn, lazy load). If Whisper exits 139 or restarts: ensure user is in `video` and `render` groups; see DOCUMENTATION.md troubleshooting. Optional local file **GPU-TROUBLESHOOTING.md** (gitignored) may exist with extra steps. CPU fallback: set `dockerfile: Dockerfile.cpu` for whisper and remove ROCm options in `docker-compose.yml`.
+See [daily commands and mesh access](docs/private-gateway.md#daily-operation-and-network-boundaries) for the panel indicator, credential scopes, port exposure and clipboard privacy.
 
-## Table of Contents
+## Documentation and source
 
-- [Overview](#overview)
-- [Features](#features)
-- [Requirements](#requirements)
-- [Installation & Deployment](#installation--deployment)
-- [Usage](#usage)
-- [Customization & Contributing](#customization--contributing)
-
----
-
-## Overview
-
-InnerVoice enables Telegram users to simply send a voice message and receive:
-
-- A **transcription** of the audio.
-- A **translation** of the spoken content.
-
-The bot is designed for reproducibility and ease of deployment on various servers. You can clone or download the repository and follow the instructions below to set up your environment.
-
----
-
-## Features
-
-- **Voice-to-Text Transcription:** Converts audio messages to text.
-- **Translation:** Provides a translation of the transcribed text.
-- **Multi-language Support:** Supports Spanish, English, French, Dutch, Portuguese, and German.
-- **Privacy-First Design:** Runs locally on your machine, keeping your data private.
-- **Docker Support:** Easy deployment with containerization.
-- **Resource-Efficient:** Optimized for basic hardware without GPU requirement.
-- **Logging:** Detailed logs aid in debugging and performance monitoring.
-
----
-
-## Requirements
-
-The bot requires:
-
-- **Python 3.8+**
-- **ffmpeg** for audio conversion
-- **A Telegram Bot API Token** (generated via BotFather)
-- **Linux/macOS/Windows environment**
-
-### System Dependencies
-
-Ensure the following packages are installed before running the bot:
-
-```bash
-sudo apt update
-sudo apt install python3-venv
-sudo apt install ffmpeg
-```
-
-> **Note:** `ffmpeg` is required to convert OGG voice messages to WAV format.
-
----
-
-## Installation & Deployment
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/arkano1dev/InnerVoice.git
-cd InnerVoice
-```
-
-### 2. Set Up the Virtual Environment
-
-```bash
-python3 -m venv venv
-source venv/bin/activate  # For Linux/macOS
-venv\Scripts\activate    # For Windows (Command Prompt)
-```
-
-### 3. Install Dependencies
-
-#### **For CPU (No CUDA/GPU)**
-```bash
-pip install aiogram python-dotenv psutil
-pip install tiktoken
-pip install openai-whisper --no-cache-dir
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-```
-
-#### **For GPU (CUDA Support)**
-```bash
-pip install -r requirements.txt
-```
-
-> **Note:** The `requirements.txt` includes the standard installation with CUDA support. If you are running the bot on a system without a GPU, follow the CPU installation steps instead.
-
-### 4. Set Up Environment Variables
-
-Create a `.env` file inside the `InnerVoice` folder:
-
-```bash
-echo 'BOT_TOKEN=your_telegram_token_here' > .env
-```
-
-Replace `your_telegram_token_here` with your actual Telegram Bot API key.
-
----
-
-## Running the Bot
-
-You can run the bot either directly or using Docker.
-
-### Option 1: Direct Execution
-
-1. Activate the Virtual Environment:
-```bash
-source venv/bin/activate  # Linux/macOS
-venv\Scripts\activate    # Windows
-```
-
-2. Start the Bot:
-```bash
-python3 bot.py
-```
-
-### Option 2: Using Docker (Recommended)
-
-1. Build and Start:
-```bash
-docker-compose up -d
-```
-
-2. View Logs:
-```bash
-docker-compose logs -f
-```
-
-3. Stop the Bot:
-```bash
-docker-compose down
-```
-
-### Docker Benefits
-- No need to install Python or dependencies locally
-- Automatic restart on failure
-- Easy deployment across different systems
-- Isolated environment
-- Resource management
-- Clean temporary file handling
----
-
-## Usage
-
-1. **Start the Bot:**
-   - Run `python3 bot.py` after setting up your environment.
-
-2. **Interacting via Telegram:**
-   - Send the `/start` command to receive a welcome message in Spanish and English.
-   - Available commands:
-     - `/lang` - Change the language for transcription/translation
-     - `/help` - View usage instructions and hardware requirements
-     - `/about` - Learn about the bot's privacy features and technology
-   - Send a voice message. The bot will:
-     - Download and convert the audio.
-     - Process the audio using the Whisper model.
-     - Return both transcription and translation.
-     - Provide processing statistics (time, segments, tokens).
-
-3. **Language Selection:**
-   - Use `/lang` to view and change the language.
-   - Supported languages:
-     - Spanish (default)
-     - English
-     - French
-     - Dutch
-     - Portuguese
-     - German
-
-4. **Logging:**
-   - Refer to `bot.log` for detailed logs and troubleshooting information.
-
----
-The performance of Inervoice depends on the Whisper model variant selected. See the guide below:
-
-|**Model Variant**|**CPU Requirements**|**Memory (RAM)**|**GPU (Optional)**|**Notes**|
-|---|---|---|---|---|
-|**Tiny**|2+ cores|≥ 2 GB|Not required|Fastest response; lower accuracy. Ideal for low-resource devices.|
-|**Base**|2+ cores|≥ 2–3 GB|Not required|Improved accuracy over Tiny; minimal resource use.|
-|**Small**|4+ cores|≥ 4 GB|Beneficial: ~2–3 GB VRAM if using GPU|Balances speed and accuracy well.|
-|**Medium**|4–8 cores|≥ 8 GB|Recommended: at least 4 GB VRAM for GPU use|Better accuracy; default model used in Inervoice.|
-|**Large**|8+ cores|≥ 16 GB|Strongly recommended: high-end GPU (≥ 8 GB VRAM)|Highest accuracy; most resource intensive.|
-
----
-## Customization & Contributing
-
-- **Change Model Variant:**
-  Modify the following line in `bot.py` to use a different Whisper model:
-  
-  ```python
-  model = whisper.load_model("medium")
-  ```
-  
-  Replace `"medium"` with `"tiny"`, `"base"`, `"small"`, or `"large"`.
-
-- **Contributions:**
-  Contributions are welcome! Please open an issue or submit a pull request for improvements.
-
----
+| Resource | What you'll find |
+| --- | --- |
+| [Private Gateway and desktop guide](docs/private-gateway.md) | Provisioning, TLS, test fixtures, agent setup, desktop recovery and acceptance. |
+| [CLI reference](docs/private-gateway.md#cli-reference) and [updates and rollback](docs/private-gateway.md#update-an-existing-gateway-deployment) | Setup, lifecycle, diagnostics, engine switching, maintenance and recovery. The entry point is [bin/innervoice](bin/innervoice). |
+| [Documentation archive](docs/archive/README.md) and [changelog](CHANGELOG.md) | Previous deployment instructions, migration context and version history. |
+| [Repository map](FILES.md) | Active source, build files and historical helpers. |
+| [Compose services](docker-compose.yml), [private deployment overlay](compose.private.yml) and [environment example](.env.example) | Service boundaries and deployment configuration. |
+| [Gateway job API](gateway/jobs.py), [recording session API](gateway/sessions.py) and [direct smoke client](clients/smoke.py) | Reference code for jobs, incremental recording and end-to-end verification. |
+| [Whisper worker](whisper/whisper_server.py) | Local inference and model handling. |
 
 ## License
 
-This project is licensed under the MIT License. Feel free to use and modify it as needed.
+InnerVoice's source code is released under the [MIT License](LICENSE). Third-party libraries and model weights are governed by their own licenses.
+
+## Project support
+
+InnerVoice is maintained by [Arkano21](https://t.me/arkano21). Report issues or propose changes through [GitHub](https://github.com/arkano1dev/InnerVoice/issues). Use synthetic examples in public reports.
+
+- Bitcoin — `bc1qwktevffc57rkk8lwyd6yqwxrvcd4vjxggcpsrn`
+- Lightning — `buffswan6@primal.net`
+- Nostr — `npub1p2x3t3njq44vsk24qjkauzurvfd59c224qyu2mpgu9jverk9tfrqnz0ql5`
