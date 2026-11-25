@@ -23,7 +23,7 @@ systemctl is-enabled docker.service
 ./bin/innervoice status
 ```
 
-The Gateway, Whisper worker and optional Telegram bot use Compose's `unless-stopped` policy. Leave the containers running before shutdown so Docker can bring them back at boot. After an intentional stop or removal, run `./bin/innervoice start` from the server checkout.
+The Gateway and optional Telegram bot use `unless-stopped`. The private Whisper worker uses `on-failure:3` to bound container crash loops. After a host or Docker daemon restart, run `./bin/innervoice start` from the server checkout to bring the worker online. Check `./bin/innervoice status` for the GPU dispatch state. A worker fault requires explicit `./bin/innervoice gpu-resume` after recovery.
 
 For Faster Whisper, use `./bin/innervoice config worker --engine faster-whisper` to save the built worker image and its local model directory. The Faster Whisper Dockerfile pins PyAV 18.1.0 for compatibility with Faster Whisper 1.2.1. Keep the saved image and model available on the server for future starts.
 

@@ -30,7 +30,9 @@ services:
       - "${IV_SECRETS:?}/tls.crt:/run/innervoice/tls.crt:ro"
       - "${IV_SECRETS:?}/tls.key:/run/innervoice/tls.key:ro"
   whisper:
+    restart: "on-failure:3"
     environment:
+      MODEL_PRELOAD: "false"
       PROFILE_REVISION: "${IV_REVISION:?}"
       WHISPER_FP16: "${IV_FP16:?}"
       WHISPER_BEAM_SIZE: "${IV_BEAM:?}"

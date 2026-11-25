@@ -24,6 +24,43 @@ active = None
 previous = None
 
 
+class WorkerFault(RuntimeError):
+    pass
+
+
+def fault_marker():
+    from jobs import ROOT
+    return ROOT / "worker-fault"
+
+
+@contextmanager
+def guarded_dispatch():
+    # The caller owns the shared inference lane. Set the latch before releasing it.
+    marker = fault_marker()
+    if marker.exists():
+        raise WorkerFault("worker_protection_active")
+    try:
+        yield
+    except (requests.ConnectionError, requests.Timeout, WorkerFault) as error:
+        from jobs import sync_dir
+        marker.touch()
+        sync_dir(marker.parent)
+        print("InnerVoice: worker inference interrupted; dispatch paused until gpu-resume", flush=True)
+        raise WorkerFault("worker_protection_active") from error
+
+
+def check_dispatch(response):
+    if response.status_code >= 500 and response.status_code != 503:
+        raise WorkerFault("worker_error")
+    if response.status_code == 503:
+        try:
+            reason = response.json().get("error")
+        except (ValueError, AttributeError):
+            reason = None
+        if reason == "gpu_oom":
+            raise WorkerFault("gpu_oom")
+
+
 @contextmanager
 def inference_lane(lane):
     global active, previous
@@ -90,7 +127,11 @@ def forward(path, *, timeout):
             timeout=(2, timeout),
             allow_redirects=False,
         )
+        if path == "/transcribe":
+            check_dispatch(upstream)
     except requests.RequestException:
+        if path == "/transcribe":
+            raise
         return jsonify(error="worker_unavailable"), 502
 
     return Response(
@@ -107,14 +148,18 @@ def transcribe():
     try:
         if os.environ.get("ENABLE_JOBS") != "1" or (Path(os.environ.get("STATE_DIR","/state"))/"drain").exists():
             return jsonify(error="gpu_busy",message="Service draining"),503
-        with inference_lane("legacy"):
+        with inference_lane("legacy"), guarded_dispatch():
             return forward("/transcribe", timeout=590)
+    except WorkerFault:
+        return jsonify(error="worker_protection_active"), 503
     finally:
         legacy_slot.release()
 
 
 @app.get("/can-transcribe")
 def can_transcribe():
+    if fault_marker().exists():
+        return jsonify(can_transcribe=False, error="worker_protection_active"), 503
     if not legacy_slot.acquire(blocking=False):
         return jsonify(can_transcribe=False, message="Whisper is processing audio. Try again when free."), 503
     try:

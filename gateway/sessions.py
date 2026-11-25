@@ -63,6 +63,8 @@ def routes(api):
                 if (tuple(saved) if saved else ("translate", 0)) != (task, streaming):
                     return jobs.failure("idempotency_conflict",409)
                 return {"session_id":old["id"]},200
+            if jobs.legacy.fault_marker().exists():
+                return {"error":{"code":"worker_protection_active","retryable":False}},503
             if jobs.paused():
                 return jobs.failure("admission_disabled",503)
             counts=db.execute("SELECT count(*),sum(owner=?) FROM jobs WHERE finished IS NULL",(owner,)).fetchone()
@@ -89,6 +91,8 @@ def routes(api):
             parts=[dict(index=r[0],text=r[1]) for r in db.execute("SELECT idx,text FROM segments WHERE job=? ORDER BY idx",(ident,))]
             body = dict(session_id=ident,state=row["state"],received=indexes,
                         segments=parts,closed=bool(row["closed"]))
+            if row["error"]:
+                body["error"] = {"code":row["error"]}
             if row["streaming"]:
                 body["preview"] = row["preview"]
             return body

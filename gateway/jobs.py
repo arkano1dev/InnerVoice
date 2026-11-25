@@ -372,7 +372,7 @@ def process(row):
         segment=""
     else:
         lane_start = time.monotonic()
-        with legacy.inference_lane("jobs"):
+        with legacy.inference_lane("jobs"), legacy.guarded_dispatch():
             lane_wait_ms = telemetry.ms(lane_start)
             if preview:
                 with database() as db:
@@ -400,6 +400,7 @@ def process(row):
             worker_request_ms = telemetry.ms(start)
             worker_ms = worker_timing(response, "X-Inference-Ms")
             model_ready_ms = worker_timing(response, "X-Model-Ready-Ms")
+            legacy.check_dispatch(response)
             response.raise_for_status()
             if any(response.headers.get(k)!=v for k,v in tags.items()):
                 raise ValueError("Unconfirmed worker dispatch")
@@ -520,6 +521,9 @@ def run():
                 maintain()
                 maintenance_at = time.monotonic()+(1 if (ROOT/"drain").exists() else 15)
             with database() as db:
+                if legacy.fault_marker().exists():
+                    db.execute("""UPDATE jobs SET state='failed',finished=?,error='worker_protection_active'
+                                  WHERE finished IS NULL""", (time.time(),))
                 rows = runnable(db)
                 owners = sorted({r["owner"] for r in rows})
                 if owners:
@@ -536,6 +540,9 @@ def run():
                 continue
             try:
                 process(row)
+            except legacy.WorkerFault:
+                with database() as db:
+                    finish_error(db,row["id"],"worker_protection_active")
             except (requests.RequestException, ValueError, KeyError, OSError):
                 with database() as db:
                     if row["is_preview"]:

@@ -92,3 +92,11 @@ Run A–D for Spanish transcription and English translation of the same fixtures
 ## Revert the desktop behavior
 
 Set `streaming` to `false`, `poll_seconds` to `1` and `ui_poll_ms` to `700` using the settings command above, then stop and start the desktop. Select `translate` for the previous English output. The compatible desktop build can still retry recordings captured in streaming mode. To reverse the optional worker rebuild, reselect the previous image in `./bin/innervoice config worker --engine faster-whisper` and run `./bin/innervoice restart --engine faster-whisper`.
+
+## Local capture and GPU fault recovery
+
+Recording writes and syncs microphone samples on the desktop before upload. A disconnected Gateway or paused GPU leaves the take in local history. Select the take in the clock menu, then use **Retry sync** for incomplete work or **Reprocess saved audio** for a completed take. Reprocessing uses the saved task and replaces the transcript only after success. A new recording can start while a previous upload finishes. Only the current take updates the visible editor. Local quota, available disk space and microphone errors still limit capture. The storage command reports local usage.
+
+A dropped worker connection, timeout, inference server error or explicit GPU out-of-memory response pauses inference in the Gateway. Desktop and Telegram share this protection. The pause survives a Gateway restart. The private worker starts with lazy model loading and Docker retries container failure up to three times. This limits repeated dispatch after a fault; the first failing GPU operation can still reset the display or device.
+
+Check the server with `./bin/innervoice status`. After investigating the host fault and restoring a stable worker, run `./bin/innervoice gpu-resume` and retry one saved take. If the bounded worker restart policy has stopped the container, start the deployment before resuming. After a host reboot, start the deployment as described in INSTALL.md.

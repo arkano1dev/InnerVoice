@@ -287,6 +287,17 @@ def play_audio(directory, cancel, events):
         events.put(("play_end", None))
 
 
+class TransferEvents:
+    def __init__(self, events):
+        self.events = events
+
+    def put(self, event):
+        self.events.put(("transfer_event", (self, event)))
+
+
+GPU_PAUSED = "GPU protection active. Audio stays on this desktop. Retry after server recovery."
+
+
 def network(cfg, directory, key, events, finished):
     try:
         client = Client(cfg)
@@ -300,6 +311,7 @@ def network(cfg, directory, key, events, finished):
     except (OSError, ValueError, AttributeError):
         events.put(("retry", ("Could not read the saved recording settings.", False)))
         return
+    reprocessing = bool(state.get("ready") and state.get("reprocess_key") == key)
     poll_seconds, ui_poll_ms = delivery_intervals(cfg)
 
     path = None
@@ -354,7 +366,7 @@ def network(cfg, directory, key, events, finished):
                 while next_index in known_received:
                     next_index += 1
                 result = (progress["segments"], progress.get("preview", ""))
-                if result != last_result:
+                if not reprocessing and result != last_result:
                     events.put(("segments", result[0]))
                     if streaming:
                         events.put(("preview", (len(result[0]), result[1])))
@@ -363,11 +375,14 @@ def network(cfg, directory, key, events, finished):
                                confirmed_segments=len(result[0]), final=progress["state"] == "succeeded")
                     last_result = result
                 if progress["state"] == "succeeded":
+                    if reprocessing:
+                        events.put(("replacement", result[0]))
                     events.put(("delivered", last_poll))
                     events.put(("ready", "Ready"))
                     return
                 if progress["state"] == "failed":
-                    events.put(("retry", ("Gateway could not finish this capture. Retry to reprocess the saved audio.", True)))
+                    message = GPU_PAUSED if progress.get("error", {}).get("code") == "worker_protection_active" else "Gateway could not finish this capture. Retry to reprocess the saved audio."
+                    events.put(("retry", (message, True)))
                     return
             for fragment in ready:
                 index = int(fragment.stem)
@@ -401,6 +416,14 @@ def network(cfg, directory, key, events, finished):
         except requests.HTTPError as error:
             status = error.response.status_code
             needs_sync = True
+            if status == 503:
+                try:
+                    code = error.response.json()["error"]["code"]
+                except (KeyError, TypeError, ValueError):
+                    code = None
+                if code == "worker_protection_active":
+                    events.put(("retry", (GPU_PAUSED, False)))
+                    return
             if status in (429, 502, 503, 504) and failures < 2:
                 failures += 1
                 events.put(("notice", "Gateway busy or unavailable. Retrying saved fragments."))
@@ -696,6 +719,7 @@ def graphical(listener):
     finished=threading.Event()
     working=False
     transfer_active = False
+    current_transfer = None
     replace_session = False
     task = cfg.get("task", "translate")
     if task not in TASK_LABELS:
@@ -729,18 +753,26 @@ def graphical(listener):
             editor.moveCursor(QTextCursor.End)
 
     def transfer():
-        nonlocal transfer_active
+        nonlocal transfer_active, current_transfer
+        state.pop("sync_error", None)
+        current_transfer = TransferEvents(events)
         transfer_active = True
-        editor.setReadOnly(state.get("streaming") is True)
+        editor.setReadOnly(state.get("streaming") is True or bool(state.get("reprocess_key")))
         retry_button.hide()
-        key = state.get("session_key", directory.name)
-        threading.Thread(target=network, args=(cfg, directory, key, events, finished), daemon=True).start()
+        key = state.get("reprocess_key") or state.get("session_key", directory.name)
+        threading.Thread(target=network, args=(cfg, directory, key, current_transfer, finished), daemon=True).start()
 
     def retry():
         nonlocal replace_session
-        if transfer_active or not finished.is_set() or not directory or state.get("ready"):
+        if playback is not None or transfer_active or not finished.is_set() or not directory or not audio_available():
             return
-        if replace_session:
+        if state.get("ready"):
+            if replace_session or not state.get("reprocess_key"):
+                state["reprocess_key"] = secrets.token_hex(16)
+            replace_session = False
+            state["replace_session"] = False
+            save()
+        elif replace_session:
             state["session_key"] = secrets.token_hex(16)
             replace_session = False
             state["replace_session"] = False
@@ -760,9 +792,6 @@ def graphical(listener):
                 timing["stop"] = pressed
                 stop.set()
                 status.setText("Finishing recording")
-            return
-        if transfer_active:
-            status.setText("Processing saved audio")
             return
         new_directory = HOME / secrets.token_hex(16)
         new_state = {"applied": 0, "ready": False, "created": time.time(), "text": "",
@@ -806,6 +835,11 @@ def graphical(listener):
             elapsed.setText(f"{seconds // 60:02}:{seconds % 60:02}")
         while not events.empty():
             kind,value=events.get()
+            if kind == "transfer_event":
+                source, event = value
+                if source is not current_transfer:
+                    continue
+                kind, value = event
             if kind=="toggle":
                 toggle(value)
             elif kind=="show":
@@ -855,6 +889,7 @@ def graphical(listener):
                 if transfer_active:
                     status.setText(capture_problem or "Processing")
                 else:
+                    status.setText(capture_problem or state.get("sync_error") or "Audio saved locally")
                     retry_button.show()
             elif kind=="level":
                 meter.setValue(value)
@@ -878,13 +913,21 @@ def graphical(listener):
                     render_live()
                     editor.setReadOnly(False)
                 message, replace_session = value
+                state["sync_error"] = message
                 state["replace_session"] = replace_session
                 save()
                 if finished.is_set():
                     indicator("Ready")
-                status.setText(message)
+                status.setText(message if finished.is_set() else "Recording locally · " + message)
                 if finished.is_set():
                     retry_button.show()
+            elif kind == "replacement":
+                state["text"] = " ".join(part["text"] for part in value if part["text"])
+                state["applied"] = len(value)
+                state.pop("reprocess_key", None)
+                with QSignalBlocker(editor):
+                    editor.setPlainText(state["text"])
+                save()
             elif kind=="ready":
                 transfer_active = False
                 working=False
@@ -895,7 +938,8 @@ def graphical(listener):
                 state["ready"]=True
                 save()
                 status.setText(value)
-                retry_button.hide()
+                set_icon(retry_button, "Reprocess saved audio", "retry")
+                retry_button.setVisible(audio_available())
                 indicator("Ready")
                 if editor.toPlainText().strip():
                     copy_result()
@@ -1013,8 +1057,9 @@ def graphical(listener):
         stop.set()
         finished.set()
         play_button.setVisible(audio_available())
-        retry_button.setVisible(not state.get("ready"))
-        status.setText("Local recording" if audio_available() else "Saved transcript")
+        set_icon(retry_button, "Reprocess saved audio" if state.get("ready") else "Retry sync", "retry")
+        retry_button.setVisible(audio_available())
+        status.setText(state.get("sync_error") or ("Local recording" if audio_available() else "Saved transcript"))
 
     def list_recoverable():
         recovery.clear()
@@ -1022,12 +1067,15 @@ def graphical(listener):
             recovery.addAction("Finish the current operation to open history").setEnabled(False)
             return
         count = 0
+        page = recovery
         for created, saved, entry in recordings(HOME):
             size = sum(p.stat().st_size for p in saved.parent.glob("*.raw"))
             transcript = " ".join(entry.get("text", "").split())
             if size < 2 and not transcript:
                 continue
             duration = size // 32000
+            if count and count % 10 == 0:
+                page = page.addMenu("Older recordings")
             count += 1
             stamp = time.strftime("%b %d, %H:%M", time.localtime(created))
             title = transcript[:42] + ("…" if len(transcript) > 42 else "")
@@ -1039,9 +1087,7 @@ def graphical(listener):
             if entry.get("task") in TASK_LABELS:
                 details.append("ES" if entry["task"] == "transcribe" else "EN")
             label = title.replace("&", "&&") + "\n" + "  ·  ".join(details)
-            recovery.addAction(label, lambda checked=False, file=saved: recover(file))
-            if count == 10:
-                break
+            page.addAction(label, lambda checked=False, file=saved: recover(file))
         if not recovery.actions():
             recovery.addAction("No saved recordings").setEnabled(False)
     recovery.aboutToShow.connect(list_recoverable)

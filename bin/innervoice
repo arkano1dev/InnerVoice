@@ -656,7 +656,13 @@ def operate(args):
             if not args.watch:
                 return
             time.sleep(2)
+    if args.cmd=="gpu-resume":
+        (Path(active["deployment"]["data"])/"worker-fault").unlink(missing_ok=True)
+        print("GPU dispatch enabled. Retry saved recordings from the desktop.")
+        return
     if args.cmd=="status":
+        print("GPU dispatch:", "paused after worker failure" if
+              (Path(active["deployment"]["data"])/"worker-fault").exists() else "enabled")
         compose(active,"ps")
         print("Saved engine:",cfg["deployment"]["engine"],"active engine:",active["deployment"]["engine"] if ACTIVE.exists() else "unavailable",
               "pending edits:",not ACTIVE.exists() or active!=cfg)
@@ -786,7 +792,7 @@ Daily operation
   stop                   Drain jobs and stop services.
   desktop                Manage a native desktop client (setup/start/stop/status/check).
   agent setup            Save a local connection for the command STT provider.""")
-    parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential","logs","build","worker-only","audit"])
+    parser.add_argument("cmd",choices=["initialize","config","start","restart","stop","status","dashboard","credential","logs","build","worker-only","audit","gpu-resume"])
     parser.add_argument("action",nargs="?")
     parser.add_argument("values",nargs="*")
     parser.add_argument("--setup",action="store_true",help="walk through private Gateway setup before starting")

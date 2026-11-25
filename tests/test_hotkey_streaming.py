@@ -211,6 +211,52 @@ class StreamingTests(unittest.TestCase):
         self.assertIn(("preview", (1, "")), emitted)
         self.assertEqual(emitted[-1], ("ready", "Ready"))
 
+    def test_worker_disconnect_blocks_further_dispatch_until_manual_resume(self):
+        path = self.create("fault", json={"streaming": True})
+        piece = b"\x01\x00" * (sessions.STREAM_BLOCK // 2)
+        self.upload(path, 0, piece)
+        with patch.object(jobs.legacy.upstream_client, "post", side_effect=requests.ConnectionError):
+            with self.assertRaises(jobs.legacy.WorkerFault):
+                self.process(preview=True)
+        self.assertTrue(jobs.legacy.fault_marker().is_file())
+        with self.assertRaises(jobs.legacy.WorkerFault):
+            with jobs.legacy.guarded_dispatch():
+                self.fail("A second request reached the worker")
+        response = self.call("POST", "/v1/sessions", headers={"Idempotency-Key": "next"})
+        self.assertEqual(response.json["error"]["code"], "worker_protection_active")
+        jobs.legacy.fault_marker().unlink()
+        self.create("resumed")
+
+    def test_reprocess_keeps_original_audio_and_replaces_text_only_on_success(self):
+        directory = jobs.ROOT / "saved"
+        directory.mkdir()
+        state = {"ready": True, "text": "old", "reprocess_key": "again"}
+        metadata = directory / "editor.json"
+        metadata.write_text(json.dumps(state))
+        audio = directory / "000.raw"
+        audio.write_bytes(b"\x01\x00")
+        finished = threading.Event()
+        finished.set()
+        events = queue.Queue()
+
+        def call(method, path, **kwargs):
+            if method == "PUT":
+                kwargs["content_type"] = kwargs.pop("headers")["Content-Type"]
+            response = self.call(method, path, **kwargs)
+            self.assertLess(response.status_code, 400)
+            if path.endswith("/finalize"):
+                self.process(preview=False)
+            return response.json
+
+        with patch.object(desktop, "Client") as client, patch.object(desktop, "metric"):
+            client.return_value.call.side_effect = call
+            desktop.network({"poll_seconds": .1}, directory, "again", events, finished)
+        self.assertEqual(audio.read_bytes(), b"\x01\x00")
+        self.assertEqual(json.loads(metadata.read_text()), state)
+        kinds = [kind for kind, _ in events.queue]
+        self.assertNotIn("segments", kinds)
+        self.assertEqual(kinds[-3:], ["replacement", "delivered", "ready"])
+
     def test_numeric_fragment_order_survives_three_digit_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)

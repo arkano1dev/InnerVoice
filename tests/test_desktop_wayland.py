@@ -384,7 +384,7 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertEqual(observed.get("clipboard"), "Edited note")
             self.assertEqual(observed.get("history"), "Previous take")
             self.assertTrue(observed.get("playable"))
-            self.assertEqual(observed["count"], 10)
+            self.assertEqual(observed["count"], 11)
             self.assertTrue(observed["cleaned"])
             self.assertTrue(observed["separate"])
             self.assertEqual(observed["live"], "0")
