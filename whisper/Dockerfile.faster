@@ -1,8 +1,9 @@
 # The operator provisions a ROCm CTranslate2 base compatible with the deployment device.
+# Faster Whisper 1.2.1 passes metadata_errors to av.open, which PyAV 19 removed.
 ARG CT2_ROCM_IMAGE
 FROM ${CT2_ROCM_IMAGE}
 RUN python -c "import torch, ctranslate2; assert ctranslate2.__version__ == '4.9.0'; print('ctranslate2==' + ctranslate2.__version__)" > /tmp/ct2-constraint.txt && \
-    pip install --no-cache-dir -c /tmp/ct2-constraint.txt faster-whisper==1.2.1 Flask==3.1.3 gunicorn==23.0.0
+    pip install --no-cache-dir -c /tmp/ct2-constraint.txt faster-whisper==1.2.1 av==18.1.0 Flask==3.1.3 gunicorn==23.0.0
 WORKDIR /app
 COPY whisper_server.py .
 ENV HOME=/tmp XDG_CACHE_HOME=/tmp/cache
