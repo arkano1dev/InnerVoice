@@ -7,12 +7,14 @@
 | I want to… | Use |
 | --- | --- |
 | Speak to my agent through Telegram | The agent's Telegram connector passes the note to the private Voice Gateway. The agent receives one final English result and handles the reply. See the [agent provider guide](docs/private-gateway.md#agent-connection) and [reference adapter](clients/provider.py). |
-| Get a transcript or translation in Telegram | The optional, single-user InnerVoice bot sends the result back in your Telegram chat. See the [bot guide](DOCUMENTATION.md) and [current bot source](bot/bot.py). |
+| Get a transcript or translation in Telegram | The optional, single-user InnerVoice bot sends the result back in your Telegram chat. See the [bot guide](docs/private-gateway.md#server-audio-and-telegram) and [current bot source](bot/bot.py). |
 | Dictate into a desktop app | The optional Ubuntu client lets you start and stop with a shortcut, edit text as it arrives, and copy the result. The Docker client uses Wayland. Run the client [in Docker](docs/private-gateway.md#run-the-desktop-client-in-docker) or [directly on Ubuntu](docs/private-gateway.md#run-directly-on-ubuntu). |
 
 The **Voice Gateway** accepts audio over private HTTPS, uses a shared Whisper worker and holds server-side audio in RAM while processing. An interrupted container can lose unfinished audio. The standalone bot uses a dedicated bearer and a local Unix socket. The desktop client saves audio on the workstation while you record. Pause, listen, and resume the same take, or reopen one of the ten most recent recordings from the clock.
 
 ## Get started
+
+Follow [INSTALL.md](INSTALL.md) for a clean install, direct Meshnet access and the Ubuntu application launcher.
 
 1. **Set up the server.** You'll need Linux, Docker Compose, a private network endpoint and a local multilingual Whisper model. The setup wizard can create the TLS certificate. Follow [server provisioning](docs/private-gateway.md#provision-the-server).
 2. **Verify the Gateway directly.** Run `./bin/innervoice start --setup` to configure and start it. Follow the [CLI quickstart](docs/private-gateway.md#gateway-quickstart). Run the [direct smoke check](docs/private-gateway.md#direct-smoke-first) with a short synthetic audio fixture.
@@ -37,8 +39,7 @@ See [daily commands and mesh access](docs/private-gateway.md#daily-operation-and
 | --- | --- |
 | [Private Gateway and desktop guide](docs/private-gateway.md) | Provisioning, TLS, test fixtures, agent setup, desktop recovery and acceptance. |
 | [CLI reference](docs/private-gateway.md#cli-reference) and [updates and rollback](docs/private-gateway.md#update-an-existing-gateway-deployment) | Setup, lifecycle, diagnostics, engine switching, maintenance and recovery. The entry point is [bin/innervoice](bin/innervoice). |
-| [Telegram bot documentation](DOCUMENTATION.md) | Bot commands and historical deployment notes. Follow the private Gateway guide for current deployment. |
-| [Refactor baseline](docs/refactor-baseline.md) and [changelog](CHANGELOG.md) | The previous architecture, migration context and version history. |
+| [Documentation archive](docs/archive/README.md) and [changelog](CHANGELOG.md) | Previous deployment instructions, migration context and version history. |
 | [Repository map](FILES.md) | Active source, build files and historical helpers. |
 | [Compose services](docker-compose.yml), [private deployment overlay](compose.private.yml) and [environment example](.env.example) | Service boundaries and deployment configuration. |
 | [Gateway job API](gateway/jobs.py), [recording session API](gateway/sessions.py) and [direct smoke client](clients/smoke.py) | Reference code for jobs, incremental recording and end-to-end verification. |

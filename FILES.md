@@ -4,7 +4,7 @@ Start with the [project README](README.md) or the [deployment and integration gu
 
 | Area | Files |
 | --- | --- |
-| Documentation | [Gateway and desktop guide](docs/private-gateway.md), [bot documentation](DOCUMENTATION.md), [migration baseline](docs/refactor-baseline.md), [changelog](CHANGELOG.md), [license](LICENSE). |
+| Documentation | [Gateway and desktop guide](docs/private-gateway.md), [install guide](INSTALL.md), [documentation archive](docs/archive/README.md), [changelog](CHANGELOG.md), [license](LICENSE). |
 | Operator and deployment | [CLI](bin/innervoice), [base Compose](docker-compose.yml), [private overlay](compose.private.yml), [environment example](.env.example). |
 | Gateway | [Listeners and network allowlist](gateway/server.py), [job API and scheduler](gateway/jobs.py), [session API](gateway/sessions.py), [legacy bot compatibility](gateway/legacy.py), [telemetry](gateway/telemetry.py), [image](gateway/Dockerfile), [dependencies](gateway/requirements.txt). |
 | Clients | [Agent provider](clients/provider.py), [direct smoke](clients/smoke.py), [Ubuntu recorder](clients/desktop.py), [desktop launcher](bin/innervoice-desktop), [local storage controls](clients/recording_storage.py), [desktop image](clients/Dockerfile.desktop). |

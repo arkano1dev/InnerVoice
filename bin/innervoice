@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import secrets
 import ssl
+import socket
 import shutil
 import sqlite3
 import subprocess
@@ -137,11 +138,36 @@ def private_address(value):
     return str(address)
 
 
-def client_networks(value):
-    networks = [ipaddress.IPv4Network(part.strip()) for part in value.split(",") if part.strip()]
-    if not networks or any(not any(network.subnet_of(private) for private in PRIVATE_NETWORKS) for network in networks):
-        raise ValueError("Enter private client IPv4 addresses or CIDRs, separated by commas.")
-    return ",".join(str(network) for network in dict.fromkeys(networks))
+def client_networks(value, *, resolve=False):
+    entries = []
+    for part in value.split(","):
+        peer = part.strip().lower()
+        if not peer:
+            continue
+        if re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.nord\.?", peer):
+            peer = peer.removesuffix(".")
+            if not resolve:
+                entries.append(peer)
+                continue
+            try:
+                addresses = {entry[4][0] for entry in socket.getaddrinfo(
+                    peer, None, family=socket.AF_INET, type=socket.SOCK_STREAM
+                )}
+            except socket.gaierror:
+                raise ValueError("A Nord name could not be resolved. Check Meshnet on the Gateway host.") from None
+            if len(addresses) != 1 or ipaddress.IPv4Address(next(iter(addresses))) not in PRIVATE_NETWORKS[-1]:
+                raise ValueError("Each Nord name must resolve to one Meshnet IPv4 address.")
+            peer = addresses.pop()
+        try:
+            network = ipaddress.IPv4Network(peer)
+        except ValueError:
+            raise ValueError("Use private client IPv4 addresses, CIDRs or full Nord names, separated by commas.") from None
+        if not any(network.subnet_of(private) for private in PRIVATE_NETWORKS):
+            raise ValueError("Allowed clients must be on private IPv4 networks.")
+        entries.append(str(network))
+    if not entries:
+        raise ValueError("Enter at least one allowed client.")
+    return ",".join(dict.fromkeys(entries))
 
 
 def listen_port(value):
@@ -233,7 +259,10 @@ def setup(cfg, engine=None):
     print("  Use the server's IP on the network your voice client can reach.")
     deployment["bind"] = prompt("Server IPv4 address (LAN, VLAN or virtual network)", deployment["bind"], private_address)
     deployment["port"] = prompt("HTTPS port", str(deployment["port"]), listen_port)
-    print("  Enter the client IP, or multiple IPs or subnets separated by commas.")
+    print("  For direct Meshnet, use the server's Meshnet IPv4 and allow incoming traffic from each linked client.")
+    print("  Enter individual client IPv4 addresses or full Nord names ending in .nord.")
+    print("  Use a CIDR only to grant access to an entire subnet. Separate entries with commas.")
+    print("  Nord names resolve on this server when the Gateway starts. Clients also need a scoped bearer.")
     deployment["allowed_networks"] = prompt("Allowed clients", deployment["allowed_networks"], client_networks)
 
     configure_worker(cfg, engine)
@@ -349,12 +378,14 @@ def env(cfg):
                 IV_REVISION=hashlib.sha256(json.dumps([p,d["engine"],cfg["validation"],"decoder-v1"],sort_keys=True).encode()).hexdigest())
 
 
-def compose(cfg,*args,capture=False):
+def compose(cfg,*args,capture=False,allowed_networks=None):
     files = ["-f","docker-compose.yml","-f","compose.private.yml"]
     if cfg["deployment"].get("telegram"):
         files += ["-f","compose.telegram.yml"]
     command = ["docker", "compose", *files]
     environment = env(cfg)
+    if allowed_networks is not None:
+        environment["IV_ALLOWED_NETWORKS"] = allowed_networks
     if args[0] == "up":
         # Read the effective device mapping, including overrides from Compose's .env.
         config = subprocess.run([*command, "config", "--format", "json", "whisper"],
@@ -575,7 +606,8 @@ def operate(args):
             compose(cfg,"build","gateway", *(["bot"] if cfg["deployment"]["telegram"] else []))
         else:
             preflight(cfg)
-            compose(cfg,"up","-d","--no-build","--pull","never","whisper")
+            compose(cfg,"up","-d","--no-build","--pull","never","whisper",
+                    allowed_networks=client_networks(cfg["deployment"]["allowed_networks"], resolve=True))
         return
     if args.cmd=="dashboard":
         while True:
@@ -623,6 +655,7 @@ def operate(args):
         if running:
             raise ValueError("Settings saved. Run ./bin/innervoice restart to apply them to the running deployment.")
     if args.cmd!="stop":
+        allowed_networks = client_networks(cfg["deployment"]["allowed_networks"], resolve=True)
         print("Checking the worker image, model weights and HTTPS configuration…", flush=True)
         preflight(cfg)
         # Complete candidate builds before interrupting an active service.
@@ -647,7 +680,8 @@ def operate(args):
             drain.unlink(missing_ok=True)
     if args.cmd=="stop":
         return
-    compose(cfg,"up","-d",*(["--force-recreate"] if args.cmd=="restart" else []),"--no-build","--pull","never","--remove-orphans")
+    compose(cfg,"up","-d",*(["--force-recreate"] if args.cmd=="restart" else []),"--no-build","--pull","never","--remove-orphans",
+            allowed_networks=allowed_networks)
     print("Waiting for the Gateway and Whisper to respond…", flush=True)
     probe=("import requests,socket,ssl; c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); "
            "c.check_hostname=False; c.verify_mode=ssl.CERT_NONE; "

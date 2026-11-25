@@ -5,11 +5,14 @@ import socket
 import sys
 
 from PyQt5.QtCore import QFileSystemWatcher, Qt
-from PyQt5.QtGui import QColor, QIcon, QPainter, QPixmap
+from PyQt5.QtGui import QColor, QIcon, QPainter
 from PyQt5.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 state = Path.home()/".local/state/innervoice-desktop"
 app = QApplication(sys.argv)
+app.setApplicationName("InnerVoice")
+app.setDesktopFileName("io.github.arkano1dev.InnerVoice")
+app_icon = QIcon(str(Path(__file__).with_name("assets") / "innervoice.png"))
 app.setQuitOnLastWindowClosed(False)
 if not QSystemTrayIcon.isSystemTrayAvailable():
     sys.exit("Enable an AppIndicator/StatusNotifier tray in the desktop shell.")
@@ -30,13 +33,12 @@ def refresh():
         label = (state/"indicator").read_text()
     except OSError:
         label = "Offline"
-    pix = QPixmap(32, 32)
-    pix.fill(Qt.transparent)
+    pix = app_icon.pixmap(32, 32)
     paint = QPainter(pix)
     paint.setRenderHint(QPainter.Antialiasing)
     paint.setPen(Qt.NoPen)
     paint.setBrush(QColor({"Recording":"#ff354e", "Ready":"#75d9cf", "Processing":"#efbe67"}.get(label, "#808088")))
-    paint.drawEllipse(4, 4, 24, 24)
+    paint.drawEllipse(21, 21, 8, 8)
     paint.end()
     tray.setIcon(QIcon(pix))
     tray.setToolTip("InnerVoice · " + label)

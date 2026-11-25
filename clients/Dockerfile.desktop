@@ -26,6 +26,7 @@ RUN python -c "from PySide6.QtWidgets import QApplication; import sounddevice" |
     for lib in "$qt"/lib/libQt6Core.so.6 "$qt"/lib/libQt6Gui.so.6 "$qt"/lib/libQt6Widgets.so.6 "$qt"/lib/libQt6WaylandClient.so.6 "$qt"/plugins/platforms/*wayland*.so; do ldd "$lib" || true; done; exit 1; }
 ENV HOME=/home/innervoice
 COPY desktop.py provider.py recording_storage.py ./
+COPY assets/innervoice.png ./assets/
 USER 65534:65534
 ENTRYPOINT ["/opt/innervoice/bin/python", "/app/desktop.py"]
 CMD ["run"]

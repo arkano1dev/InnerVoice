@@ -6,6 +6,8 @@ if [[ "$action" == help || "$action" == --help || "$action" == -h ]]; then
     cat <<'HELP'
 InnerVoice desktop
 
+  install     Guide first-time setup and add InnerVoice to your applications.
+  open        Start the recorder if needed and show its editor.
   setup       Verify the gateway and save this workstation's settings.
   start       Start with the saved settings.
   update      Build the current desktop code and start it.
@@ -22,8 +24,8 @@ HELP
     exit
 fi
 case "$action" in
-    setup|start|update|power|toggle|show|shortcut|check|storage|status|logs|stop) ;;
-    *) echo "Usage: $0 setup|start|update|power|toggle|show|shortcut|check|storage|status|logs|stop" >&2; exit 2 ;;
+    install|open|setup|start|update|power|toggle|show|shortcut|check|storage|status|logs|stop) ;;
+    *) echo "Usage: $0 install|open|setup|start|update|power|toggle|show|shortcut|check|storage|status|logs|stop" >&2; exit 2 ;;
 esac
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ "$action" == storage ]]; then
@@ -46,6 +48,34 @@ esac
 export IV_DESKTOP_PULSE=$runtime_dir/pulse
 export IV_DESKTOP_CONFIG=$HOME/.config/innervoice-desktop
 export IV_DESKTOP_STATE=$HOME/.local/state/innervoice-desktop
+
+if [[ "$action" == install ]]; then
+    echo "InnerVoice for Ubuntu Wayland"
+    echo "Requirements: Docker Compose, a Wayland session and PulseAudio or PipeWire-Pulse."
+    echo "For the tray: install python3-pyqt5 and qtwayland5 and enable your desktop's AppIndicator extension."
+    echo "See $repo_dir/INSTALL.md for Gateway credentials and Meshnet checks."
+    if [[ ! -f "$IV_DESKTOP_CONFIG/settings.json" ]]; then
+        "$repo_dir/bin/innervoice-desktop" setup
+    fi
+    "$repo_dir/bin/innervoice-desktop" start
+    python3 "$repo_dir/clients/install_launcher.py"
+    printf 'Open InnerVoice from Applications. Optional shortcut command:\n'
+    "$repo_dir/bin/innervoice-desktop" shortcut
+    exit
+fi
+if [[ "$action" == open ]]; then
+    if "$repo_dir/bin/innervoice-desktop" show 2>/dev/null; then exit; fi
+    if "$repo_dir/bin/innervoice-desktop" start; then
+        for ((attempt=0; attempt<20; attempt++)); do
+            if "$repo_dir/bin/innervoice-desktop" show 2>/dev/null; then exit; fi
+            sleep 0.25
+        done
+    fi
+    if command -v notify-send >/dev/null; then
+        notify-send "InnerVoice" "Recorder unavailable. Run innervoice-desktop status and logs from the checkout." || true
+    fi
+    exit 1
+fi
 
 compose=(docker compose --env-file /dev/null -p innervoice-desktop -f "$repo_dir/compose.desktop.yml")
 mode=${INNERVOICE_DESKTOP_HOST_NETWORK:-}
@@ -71,6 +101,8 @@ if [[ "$action" == setup || "$action" == start || "$action" == update ]]; then
     fi
     install -d -m 700 "$IV_DESKTOP_CONFIG" "$IV_DESKTOP_STATE"
     if [[ "$action" == setup ]]; then
+        printf 'Desktop network: %s (1 uses the workstation network, 0 uses Docker bridge).\n' "$mode"
+        echo "For direct Meshnet, leave traffic routing off. If only Docker times out, see INSTALL.md."
         "${compose[@]}" run --rm --volume "$IV_DESKTOP_CONFIG:/home/innervoice/.config/innervoice-desktop:rw" desktop setup
         umask 077
         temp_mode=$(mktemp "$IV_DESKTOP_CONFIG/.network-mode.XXXXXX")
@@ -105,10 +137,10 @@ if [[ "$action" == setup || "$action" == start || "$action" == update ]]; then
     fi
     if /usr/bin/python3 -c 'from PyQt5.QtWidgets import QSystemTrayIcon' 2>/dev/null; then
         if ! systemctl --user is-active --quiet innervoice-indicator.service; then
-            systemd-run --user --collect --unit=innervoice-indicator --setenv=WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" /usr/bin/python3 "$repo_dir/clients/tray.py" || echo "Panel indicator unavailable. The recorder overlay remains accessible."
+            systemd-run --user --collect --unit=innervoice-indicator --setenv=QT_QPA_PLATFORM=wayland --setenv=WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" /usr/bin/python3 "$repo_dir/clients/tray.py" || echo "Panel indicator unavailable. The recorder overlay remains accessible."
         fi
     else
-        echo "For the panel indicator install python3-pyqt5 and enable your desktop's AppIndicator tray."
+        echo "For the panel indicator install python3-pyqt5 and qtwayland5 and enable your desktop's AppIndicator tray."
     fi
     exit
 fi

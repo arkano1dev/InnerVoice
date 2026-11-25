@@ -1,6 +1,6 @@
 # Private Voice Gateway and Ubuntu desktop
 
-Candidate source handoff. All target-host, installed-provider, performance and desktop acceptance checks are pending. Keep local settings and operator evidence outside the checkout. The baseline and rollback inventory is in [refactor-baseline.md](refactor-baseline.md).
+Candidate source handoff. All target-host, installed-provider, performance and desktop acceptance checks are pending. Keep local settings and operator evidence outside the checkout. The baseline and rollback inventory is in [refactor-baseline.md](archive/refactor-baseline.md).
 
 ## Provision the server
 
@@ -20,13 +20,13 @@ Run the guided setup from the repository root:
 ./bin/innervoice start --setup
 ```
 
-Enter the server's IPv4 address on its private LAN, VLAN or virtual network, HTTPS port, allowed client IPs or CIDRs, local worker image, multilingual model name and path to its weights. Setup reads the image ID from Docker and computes the checkpoint SHA-256. Compare the displayed digest with your trusted source before accepting a new or changed checkpoint. Use `config setup` to save the settings without starting services, and `config edit` or `config set` for advanced settings. An existing running Gateway takes saved changes on `restart`.
+Enter the server's IPv4 address on its private LAN, VLAN or virtual network, HTTPS port, allowed client IPs, CIDRs or Nord names, local worker image, multilingual model name and path to its weights. Setup reads the image ID from Docker and computes the checkpoint SHA-256. Compare the displayed digest with your trusted source before accepting a new or changed checkpoint. Use `config setup` to save the settings without starting services, and `config edit` or `config set` for advanced settings. An existing running Gateway takes saved changes on `restart`.
 
 Setup reuses the saved certificate and key if they match the chosen IP. If neither exists, it uses OpenSSL to create a self-signed certificate valid for 90 days. You can also install your own `tls.crt` and `tls.key` in the protected secrets directory before setup. For an existing CA-issued certificate, put its trust chain in `ca.crt` in the same directory if setup is creating a smoke-test client.
 
 On first setup, the wizard creates a local smoke-test client if the server has no credential map. Its bearer file, trust certificate and `client.toml` are under `~/.config/innervoice/clients/operator-smoke` by default. From another authorized machine, copy the public trust certificate and bearer file over a protected channel and adapt the paths in the client TOML. For the Telegram agent, provision a separate credential with `./bin/innervoice credential --identity telegram-agent --scope jobs`.
 
-The setup accepts RFC 1918 private ranges and the RFC 6598 shared range (`100.64.0.0/10`) for both the server IP and the client list. On a shared-address virtual network, use the IP assigned to the server and list each authorized client's IP as a `/32`.
+The setup accepts RFC 1918 private ranges and the RFC 6598 shared range (`100.64.0.0/10`) for both the server IP and the client list. On a shared-address virtual network, use the IP assigned to the server and list each authorized client's IPv4 or full Nord name. See [direct Meshnet access](../INSTALL.md#direct-meshnet-access) for resolution and troubleshooting.
 
 The HTTPS listener rejects peers outside the configured private IPv4 addresses or CIDRs before processing bearer credentials. Apply the same restriction at the host/VLAN boundary and verify that Docker forwards the authorized source address. The worker has no published host port. Legacy routes are available inside Compose on `gateway:9000`. The private HTTPS port serves only the versioned API.
 
@@ -43,7 +43,7 @@ First activation replaces the old port mapping. Schedule it after recording the 
 | Check the connection on demand | `./bin/innervoice-desktop check` verifies TLS, token and API from the running container. `status` shows process state. |
 | Show the current editor | `./bin/innervoice-desktop show` or **Show editor** in the indicator menu. |
 
-**Mesh access.** Connect the agent and gateway as direct peers. Give the agent outbound access to the gateway peer and its HTTPS TCP port only. Deny peer traffic routing, LAN access through the peer and file sharing. Apply a default-deny rule to other services on the gateway host too. If the gateway lives behind a separate mesh router, put a peer on the gateway itself or use a destination-and-port-specific firewall rule on a dedicated ingress. A gateway token governs API calls only.
+**Mesh access.** Run Meshnet on the Gateway host and enable incoming access for the linked agent or workstation. Use the Gateway's Meshnet endpoint and keep the peer's traffic routing and LAN access disabled. Restrict HTTPS at the Docker-aware ingress and retain the Gateway's source allowlist and scoped bearer. See [direct Meshnet access](../INSTALL.md#direct-meshnet-access).
 
 **Listener exposure.** The default publishes HTTPS on the selected private host address. For a multihomed gateway, `config set deployment.listen_all=true` publishes that port on **every IPv4 interface**, including any public interface. Set the Docker-aware ingress policy first. Keep `deployment.bind` as the actual private address clients verify against the certificate. Extra client-facing addresses need their own matching certificate SANs. Set `deployment.listen_all=false` and restart to restore single-address publishing. Never publish the worker or the bot compatibility port. Docker's forwarding rules can bypass ordinary UFW input rules. Verify reachability from an allowed peer and denial from an unauthorized peer and the public side. See [Docker packet filtering](https://docs.docker.com/engine/network/packet-filtering-firewalls/) and the [Meshnet permissions guide](https://support.nordvpn.com/hc/en-us/articles/20278389297041-Guide-for-Meshnet-users).
 
@@ -80,7 +80,7 @@ against the previous working image with the same operator settings.
 1. Prepare the host, a trusted multilingual checkpoint and a compatible worker image. Follow [server provisioning](#provision-the-server).
 2. In the candidate checkout run `./bin/innervoice start --setup`, then `./bin/innervoice status`. Use `./bin/innervoice config setup` if you want to configure before starting.
 
-3. Set `deployment.bind` to the server's private address, `deployment.port` to the agreed listener port, and `deployment.allowed_networks` to the comma-separated private IPv4 addresses or CIDRs for the clients. Include the direct smoke client. Enforce the same restriction at the host/VLAN boundary. Keep deployment settings, weights, credentials, certificates, audio and runtime state outside the checkout. The worker and the bot compatibility listener have no published host ports.
+3. Set `deployment.bind` to the server's private address, `deployment.port` to the agreed listener port, and `deployment.allowed_networks` to the comma-separated private IPv4 addresses, CIDRs or full Nord names for the clients. Include the direct smoke client. Enforce the same restriction at the host/VLAN boundary. Keep deployment settings, weights, credentials, certificates, audio and runtime state outside the checkout. The worker and the bot compatibility listener have no published host ports.
 4. Start with admission disabled while checking the private listener and bot. When ready for the first direct smoke test, enable jobs and restart.
 
    ```bash
@@ -227,14 +227,13 @@ On the Gateway server, register a client with `./bin/innervoice credential --ide
 Run these commands from the workstation's checkout:
 
 ```bash
-./bin/innervoice-desktop setup
-./bin/innervoice-desktop start
+./bin/innervoice-desktop install
 ./bin/innervoice-desktop shortcut
 ```
 
 Enter the Gateway's full HTTPS URL and accept the suggested certificate path. Paste the registered token at the hidden prompt or reuse a local bearer file. The wizard checks TLS, the token, and support for desktop recording before saving. It uses the default microphone and retains advanced settings in an existing configuration. The wizard does not schedule an audio job; the first short recording verifies admission and inference. The `shortcut` command prints the full command to register in your desktop settings. In Ubuntu GNOME, open **Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts**. Add **InnerVoice**, paste the printed command and assign **Super+Shift+F8** or another free combination. The compositor calls `toggle` in the running container.
 
-For daily use, run `./bin/innervoice-desktop start`. It reuses the desktop image and your saved settings. After pulling changes to the desktop application or its dependencies, run `./bin/innervoice-desktop update` to rebuild and start it.
+For daily use, launch **InnerVoice** from Applications or run `./bin/innervoice-desktop open`. It reuses the desktop image and your saved settings. After pulling changes to the desktop application or its dependencies, run `./bin/innervoice-desktop update` to rebuild and start it.
 
 Press the shortcut once to record and again to stop. Existing shortcuts keep their binding until you change it in Settings. Check for conflicts in your compositor. Run `./bin/innervoice-desktop show` and click **Record** to test before assigning a shortcut. Use `./bin/innervoice-desktop status`, `logs` or `stop` to manage the client. Settings and saved recordings survive container restarts.
 

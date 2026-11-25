@@ -120,6 +120,8 @@ def setup(agent=False):
     cfg.setdefault("microphone", "")
     print("InnerVoice agent setup" if agent else "InnerVoice desktop setup")
     print("Press Enter to keep a value in brackets. Ctrl+C cancels without saving.\n")
+    print("Have the Gateway HTTPS address, its public certificate and a scoped token ready.")
+    print("For Meshnet, use the private endpoint covered by the certificate.")
 
     while True:
         print("1/3  Gateway address")
@@ -138,7 +140,8 @@ def setup(agent=False):
         if not agent and not wayland_session():
             cfg["hotkey"] = ask("Recording shortcut", cfg.get("hotkey", "<cmd>+<shift>+<f8>"))
         print("\n3/3  Verify and save")
-        print("  Checking the Gateway's TLS, credential and desktop session support…", flush=True)
+        capability = "job" if agent else "recording session"
+        print(f"  Checking TLS, the credential and {capability} support…", flush=True)
         try:
             check_gateway(cfg, bearer)
         except (requests.RequestException, ValueError, OSError) as error:
@@ -372,6 +375,10 @@ def graphical(listener):
         os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
     pointer=HOME/"current"
     app = QApplication([])
+    app.setApplicationName("InnerVoice")
+    app.setDesktopFileName("io.github.arkano1dev.InnerVoice")
+    app_icon = QIcon(str(Path(__file__).with_name("assets") / "innervoice.png"))
+    app.setWindowIcon(app_icon)
     app.setQuitOnLastWindowClosed(False)
     class RecorderWindow(QWidget):
         def closeEvent(self, event):
@@ -393,6 +400,7 @@ def graphical(listener):
     root = RecorderWindow(None, Qt.Window | Qt.FramelessWindowHint)
     root.setAttribute(Qt.WA_TranslucentBackground)
     root.setWindowTitle("InnerVoice")
+    root.setWindowIcon(app_icon)
     root.setStyleSheet("""
         QWidget#pill {background:rgba(22,22,25,226);border:1px solid #47474e;border-radius:26px}
         QLabel {color:#bfbfc7;font-size:12px;background:transparent}
@@ -522,22 +530,21 @@ def graphical(listener):
 
     def indicator(phase):
         status.setStyleSheet("color:" + {"Recording":"#ffa0aa", "Processing":"#edc280", "Ready":"#a2d9c7"}.get(phase, "#cac5df"))
-        pix = QPixmap(32, 32)
-        pix.fill(Qt.transparent)
+        pix = app_icon.pixmap(32, 32)
         painter = QPainter(pix)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor({"Recording":"#ff354e", "Processing":"#efbe67"}.get(phase, "#75d9cf")))
-        painter.drawEllipse(4, 4, 24, 24)
+        painter.drawEllipse(21, 21, 8, 8)
         painter.end()
         icon = QIcon(pix)
         tray.setIcon(icon)
-        root.setWindowIcon(icon)
         tray.setToolTip("InnerVoice · " + phase)
         atomic(HOME/"indicator", phase.encode())
 
     indicator("Ready")
-    tray.show()
+    if QSystemTrayIcon.isSystemTrayAvailable():
+        tray.show()
     started = 0.
     paused_at = None
     pause = threading.Event()

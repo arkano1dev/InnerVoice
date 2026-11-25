@@ -1,5 +1,7 @@
 # InnerVoice refactor baseline
 
+> Historical reference. For current deployment, see [INSTALL.md](../../INSTALL.md).
+
 Stage 0 source inventory. Clean `main` at `0b8edc9bb812cc4e64eefb24bebd00b196c8ba2b`.
 All runtime checks are pending operator execution.
 

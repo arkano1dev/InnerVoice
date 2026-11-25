@@ -1,10 +1,12 @@
 # InnerVoice Bot - Complete Documentation
 
-> For the current private Gateway release, start with the [project README](README.md) and [operator guide](docs/private-gateway.md). This document also preserves earlier standalone bot deployment instructions.
+> Historical reference. For current deployment, see [INSTALL.md](../../INSTALL.md).
+
+> For the current private Gateway release, start with the [project README](../../README.md) and [operator guide](../private-gateway.md). This document also preserves earlier standalone bot deployment instructions.
 
 **Version**: 3.0.0  
 **Last Updated**: February 2025  
-**Scope**: Historical standalone bot reference. On the private Gateway branch use the [current deployment and privacy instructions](docs/private-gateway.md#server-audio-and-telegram).
+**Scope**: Historical standalone bot reference. On the private Gateway branch use the [current deployment and privacy instructions](../private-gateway.md#server-audio-and-telegram).
 
 ---
 
@@ -118,7 +120,7 @@ To use a different GPU (e.g. eGPU on device 1), set `ROCR_VISIBLE_DEVICES=1` (or
 
 ### Reusing Whisper
 
-The compatibility Gateway serves the following legacy paths at `http://gateway:9000` inside `TelegramNet`. The current Compose candidate has no host-published endpoint. See the [refactor baseline and operator checks](docs/refactor-baseline.md) for the rollout status.
+The compatibility Gateway serves the following legacy paths at `http://gateway:9000` inside `TelegramNet`. The current Compose candidate has no host-published endpoint. See the [refactor baseline and operator checks](refactor-baseline.md) for the rollout status.
 
 - `POST /transcribe` – multipart form: `audio` (WAV), optional `language`, `task` (transcribe/translate), `return_segments`. Model is loaded on first request (lazy).
 - `GET /health` – `status`, `model`; `vram_used_mb` / `vram_total_mb` only after the model has been loaded
@@ -879,7 +881,7 @@ docker compose logs -f bot
 
 4. **After Whisper is stable**: Once the whisper container runs and listens on 9000, the "Cannot connect to whisper:9000" errors in the bot will stop. The network (e.g. `TelegramNet`) is fine; the issue is the service not being up.
 
-5. **Worker exits or restarts**. Check runtime compatibility and logs privately. Follow the [Gateway operator guide](docs/private-gateway.md) for the active worker image and model profile.
+5. **Worker exits or restarts**. Check runtime compatibility and logs privately. Follow the [Gateway operator guide](../private-gateway.md) for the active worker image and model profile.
 
 ### Out of Memory
 
@@ -1023,5 +1025,5 @@ Each message limited to 4096 characters (Telegram limit)
 
 **Version**: 2.1.0  
 **Last Updated**: November 14, 2025  
-**Scope**: Historical standalone bot reference. On the private Gateway branch use the [current deployment and privacy instructions](docs/private-gateway.md#server-audio-and-telegram).
+**Scope**: Historical standalone bot reference. On the private Gateway branch use the [current deployment and privacy instructions](../private-gateway.md#server-audio-and-telegram).
 **Made with ❤️ by @arkano21**
