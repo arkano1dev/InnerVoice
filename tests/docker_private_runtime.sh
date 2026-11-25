@@ -30,7 +30,6 @@ services:
     group_add: !reset []
     devices: !reset []
     volumes:
-      - "$PWD/whisper/whisper_server.py:/app/whisper_server.py:ro"
       - "$PWD/tests/docker_worker_fixture.py:/app/fixture.py:ro"
     command: [python, /app/fixture.py]
   bot:
@@ -48,6 +47,30 @@ trap cleanup EXIT
 IV_RENDER_NODE=/dev/dri/renderD129 WHISPER_RENDER_GROUP=render "${base[@]}" config --format json whisper |
   python3 -c 'import json,sys; w=json.load(sys.stdin)["services"]["whisper"]; assert w["group_add"] == ["render"]; assert [d["source"] for d in w["devices"] if d["target"] != "/dev/kfd"] == ["/dev/dri/renderD129"]'
 "${stack[@]}" build gateway bot
+# Upgrade a pinned legacy worker before running the production HTTP server on the CI fixture.
+legacy_worker="$COMPOSE_PROJECT_NAME-legacy-worker"
+docker build --build-arg FIXTURE_BASE="$COMPOSE_PROJECT_NAME-gateway" -t "$legacy_worker" -f - . <<'DOCKERFILE'
+ARG FIXTURE_BASE
+FROM ${FIXTURE_BASE}
+USER root
+RUN printf '%s\n' 'raise RuntimeError("Legacy worker was not upgraded")' > /app/whisper_server.py
+USER 65534:65534
+DOCKERFILE
+python3 - "$legacy_worker" "$temp/upgraded-worker" <<'PY'
+from pathlib import Path
+import runpy
+import sys
+
+cli = runpy.run_path("bin/innervoice")
+image, output = sys.argv[1:]
+image_id = cli["local_image_id"](image)
+upgraded = cli["prepare_worker_image"](image, image_id)
+assert upgraded != image
+assert cli["prepare_worker_image"](image, image_id) == upgraded
+Path(output).write_text(upgraded)
+PY
+export IV_IMAGE
+IV_IMAGE=$(cat "$temp/upgraded-worker")
 touch "$IV_DATA/startup-pending"
 "${stack[@]}" up -d --no-build --pull never
 port=$("${stack[@]}" port gateway 9443 | awk -F: '{print $NF}')

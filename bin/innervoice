@@ -380,7 +380,7 @@ def env(cfg):
                 IV_REVISION=hashlib.sha256(json.dumps([p,d["engine"],cfg["validation"],"decoder-v1"],sort_keys=True).encode()).hexdigest())
 
 
-def compose(cfg,*args,capture=False,allowed_networks=None,timeout=None):
+def compose(cfg,*args,capture=False,allowed_networks=None,timeout=None,worker_image=None):
     files = ["-f","docker-compose.yml","-f","compose.private.yml"]
     if cfg["deployment"].get("telegram"):
         files += ["-f","compose.telegram.yml"]
@@ -388,6 +388,8 @@ def compose(cfg,*args,capture=False,allowed_networks=None,timeout=None):
     environment = env(cfg)
     if allowed_networks is not None:
         environment["IV_ALLOWED_NETWORKS"] = allowed_networks
+    if worker_image is not None:
+        environment["IV_IMAGE"] = worker_image
     if args[0] == "up":
         # Read the effective device mapping, including overrides from Compose's .env.
         config = subprocess.run([*command, "config", "--format", "json", "whisper"],
@@ -432,6 +434,42 @@ def verify_private_memory(cfg, services):
 
 def host_swap_active():
     return len(Path("/proc/swaps").read_text().splitlines()) > 1
+
+
+def image_labels(image):
+    result = subprocess.run(["docker", "image", "inspect", "--format", "{{json .Config.Labels}}", image],
+                            capture_output=True, text=True)
+    return (json.loads(result.stdout) or {}) if result.returncode == 0 else {}
+
+
+def prepare_worker_image(image, image_id):
+    memory_label = "io.github.arkano1dev.innervoice.private-memory"
+    if image_labels(image_id).get(memory_label) == "1":
+        return image
+
+    dockerfile = "whisper/Dockerfile.private-memory"
+    inputs = [image_id.encode()]
+    for path in (dockerfile, "whisper/whisper_server.py", "private_memory.py"):
+        inputs.append((REPO / path).read_bytes())
+    fingerprint = hashlib.sha256(b"\0".join(inputs)).hexdigest()
+    cache_label = f"{memory_label}-input"
+    upgraded = f"innervoice-worker:private-memory-{fingerprint}"
+    if image_labels(upgraded).get(cache_label) == fingerprint:
+        return upgraded
+
+    # Build from the reviewed local image ID, preserving its dependencies and GPU runtime.
+    base = f"innervoice-worker:base-{image_id.removeprefix('sha256:')}"
+    print("Preparing the saved Whisper image for per-container swap protection…", flush=True)
+    try:
+        subprocess.run(["docker", "image", "tag", image_id, base], check=True)
+        subprocess.run(["docker", "buildx", "build", "--builder", "default", "--load",
+                        "--pull=false", "--network=none", "--build-arg", f"PINNED_WORKER={base}",
+                        "--label", f"{cache_label}={fingerprint}", "-f", dockerfile, "-t", upgraded, "."],
+                       check=True, cwd=REPO)
+    except subprocess.CalledProcessError as error:
+        raise ValueError("Could not prepare the saved Whisper image. "
+                         "Check Docker Buildx and the local InnerVoice worker image.") from error
+    return upgraded
 
 
 def stop_deployment(cfg):
@@ -535,16 +573,6 @@ def preflight(cfg):
     image_id = local_image_id(p["image"])
     if p["image_id"] and p["image_id"]!=image_id:
         raise ValueError("The worker image has changed. Run ./bin/innervoice config setup to review the new image.")
-    if host_swap_active():
-        label = subprocess.check_output(
-            ["docker", "image", "inspect", "--format",
-             '{{index .Config.Labels "io.github.arkano1dev.innervoice.private-memory"}}', image_id],
-            text=True,
-        ).strip()
-        if label != "1":
-            raise ValueError("The saved Whisper image requires host swap disabled. "
-                             "Rebuild it from this checkout and pin it with config worker. "
-                             "See docs/private-gateway.md#provision-the-server.")
     if not p["fp16"] and d["engine"]=="faster-whisper":
         raise ValueError("Experimental engine requires float16")
     if p["beam"]<1 or p["idle_seconds"]<0:
@@ -565,6 +593,7 @@ def preflight(cfg):
     private_directory(state)
     if any(f.suffix in (".pcm", ".upload", ".part") for f in state.iterdir()):
         raise ValueError("Earlier audio spool files exist. Drain the previous deployment and review its state before upgrading.")
+    return prepare_worker_image(p["image"], image_id)
 
 
 def snapshot(cfg,job=None):
@@ -683,9 +712,10 @@ def operate(args):
         elif args.cmd == "build":
             compose(cfg,"build","gateway", *(["bot"] if cfg["deployment"]["telegram"] else []))
         else:
-            preflight(cfg)
+            worker_image = preflight(cfg)
             compose(cfg,"up","-d","--no-build","--pull","never","whisper",
-                    allowed_networks=client_networks(cfg["deployment"]["allowed_networks"], resolve=True))
+                    allowed_networks=client_networks(cfg["deployment"]["allowed_networks"], resolve=True),
+                    worker_image=worker_image)
             verify_private_memory(cfg, ["whisper"])
         return
     if args.cmd=="dashboard":
@@ -776,7 +806,7 @@ def operate(args):
     if args.cmd!="stop":
         allowed_networks = client_networks(cfg["deployment"]["allowed_networks"], resolve=True)
         print("Checking the worker image, model weights and HTTPS configuration…", flush=True)
-        preflight(cfg)
+        worker_image = preflight(cfg)
         # Complete candidate builds before interrupting an active service.
         compose(cfg,"build", "gateway", *(["bot"] if cfg["deployment"]["telegram"] else []))
     if args.cmd in ("stop","restart") and ACTIVE.exists():
@@ -808,7 +838,7 @@ def operate(args):
     startup = Path(cfg["deployment"]["data"]) / "startup-pending"
     atomic(startup, b"1")
     compose(cfg,"up","-d",*(["--force-recreate"] if args.cmd=="restart" else []),"--no-build","--pull","never","--remove-orphans",
-            allowed_networks=allowed_networks)
+            allowed_networks=allowed_networks, worker_image=worker_image)
     verify_private_memory(cfg, ["gateway", "whisper"] + (["bot"] if cfg["deployment"]["telegram"] else []))
     print("Waiting for the Gateway and Whisper to respond…", flush=True)
     probe=("import requests,socket,ssl; c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); "

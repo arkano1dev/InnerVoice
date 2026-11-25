@@ -1,0 +1,5 @@
+ARG PINNED_WORKER
+FROM ${PINNED_WORKER}
+RUN ["python", "-c", "from pathlib import Path; assert Path('/app/whisper_server.py').is_file(), 'Expected an InnerVoice worker image'"]
+COPY whisper/whisper_server.py private_memory.py /app/
+LABEL io.github.arkano1dev.innervoice.private-memory="1"
