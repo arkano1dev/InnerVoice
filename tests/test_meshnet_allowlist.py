@@ -17,8 +17,8 @@ class MeshnetAllowlistTests(unittest.TestCase):
     def test_validate_saved_names_without_resolving(self):
         with patch.object(socket, "getaddrinfo") as lookup:
             self.assertEqual(
-                gateway_cli.client_networks("Desktop-Example.NORD, 192.168.0.5"),
-                "desktop-example.nord,192.168.0.5/32",
+                gateway_cli.client_networks("Desktop.User-Example.NORD., 192.168.0.5"),
+                "desktop.user-example.nord,192.168.0.5/32",
             )
         lookup.assert_not_called()
 
