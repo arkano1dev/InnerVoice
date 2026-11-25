@@ -243,7 +243,10 @@ def _transcribe():
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         try:
             audio_file.save(tmp.name)
-            result = get_model().transcribe(
+            model_start = time.monotonic()
+            model = get_model()
+            inference_start = time.monotonic()
+            result = model.transcribe(
                 tmp.name,
                 task=task,
                 fp16=USE_FP16 and device=="cuda",
@@ -253,6 +256,7 @@ def _transcribe():
                 condition_on_previous_text=CONDITION_ON_PREVIOUS,
                 temperature=(0.0,),  # single temp avoids fallback loops
             )
+            inference_ms = (time.monotonic() - inference_start) * 1000
         except Exception as e:
             logger.error("Transcription failed (%s)", type(e).__name__)
             _gpu_cache_clear()
@@ -288,6 +292,8 @@ def _transcribe():
         out["segments"] = result["segments"]
     response=jsonify(out)
     if request.headers.get("X-Dispatch-Token"):
+        response.headers["X-Model-Ready-Ms"] = f"{(inference_start - model_start) * 1000:.1f}"
+        response.headers["X-Inference-Ms"] = f"{inference_ms:.1f}"
         for key in ("Job","Index","Token","Profile"):
             header="X-Dispatch-"+key
             response.headers[header]=request.headers.get(header,"")

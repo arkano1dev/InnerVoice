@@ -19,13 +19,40 @@ import wave
 
 import requests
 
-from recording_storage import audio_bytes, limit_bytes, recordings
+from recording_storage import audio_bytes, audio_fragments, limit_bytes, recordings
 from provider import Client, atomic, gateway_url, read_bearer
 
 HOME=Path.home()/".local/state/innervoice-desktop"
 CONFIG=Path.home()/".config/innervoice-desktop/settings.json"
 UNIT="innervoice-desktop.service"
 BLOCK=960000
+STREAM_SECONDS = 2
+TASK_LABELS = {"translate": "Translate to English", "transcribe": "Transcribe Spanish"}
+
+
+def metric(event, session, **values):
+    print("IV_METRIC " + json.dumps(dict(event=event, session=session, **values)), flush=True)
+
+
+def elapsed_ms(start, end=None):
+    if start is None:
+        return None
+    return round(((time.monotonic() if end is None else end) - start) * 1000, 1)
+
+
+def delivery_intervals(cfg):
+    poll = cfg.get("poll_seconds", 1)
+    if type(poll) not in (int, float) or not .1 <= poll <= 1:
+        poll = 1
+    ui = cfg.get("ui_poll_ms", 700)
+    if type(ui) is not int or not 100 <= ui <= 700:
+        ui = 700
+    return poll, ui
+
+
+def capture_options(state):
+    streaming = state.get("streaming") is True
+    return streaming, state.get("task", "translate"), STREAM_SECONDS * 32000 if streaming else BLOCK
 
 
 def check_gateway(cfg, bearer):
@@ -183,7 +210,7 @@ def setup(agent=False):
     print("Desktop settings saved. Start the client to test a recording.")
 
 
-def capture(directory, stop, events, device, pause):
+def capture(directory, stop, events, device, pause, block=BLOCK):
     from array import array
     try:
         import sounddevice as sd
@@ -191,9 +218,14 @@ def capture(directory, stop, events, device, pause):
         if remaining < 2:
             raise ValueError("Local audio limit reached. Manage space with the storage command.")
         index = 0
-        while not stop.is_set() and index < 120:
+        mic_opened = voice_detected = False
+        frame_limit = 120 * BLOCK // block
+        while not stop.is_set() and index < frame_limit:
             with sd.RawInputStream(samplerate=16000, channels=1, dtype="int16", device=device or None) as mic:
-                while not stop.is_set() and not pause.is_set() and index < 120:
+                if not mic_opened:
+                    mic_opened = True
+                    events.put(("mic_opened", time.monotonic()))
+                while not stop.is_set() and not pause.is_set() and index < frame_limit:
                     path = directory / f"{index:03d}.raw"
                     new_fragment = not path.exists()
                     with path.open("ab") as out:
@@ -203,11 +235,12 @@ def capture(directory, stop, events, device, pause):
                                 os.fsync(directory_fd)
                             finally:
                                 os.close(directory_fd)
-                        while out.tell() < BLOCK and not stop.is_set() and not pause.is_set():
-                            frames = min(4000, (BLOCK - out.tell()) // 2, remaining // 2)
+                        while out.tell() < block and not stop.is_set() and not pause.is_set():
+                            frames = min(4000, (block - out.tell()) // 2, remaining // 2)
                             if frames <= 0:
                                 raise ValueError("Local audio limit reached. Manage space with the storage command.")
                             audio, overflow = mic.read(frames)
+                            read_at = time.monotonic()
                             out.write(bytes(audio))
                             remaining -= len(audio)
                             out.flush()
@@ -215,8 +248,13 @@ def capture(directory, stop, events, device, pause):
                             if overflow:
                                 raise ValueError("Microphone overflow")
                             samples = array("h", bytes(audio))
-                            events.put(("level", min(100, max(map(abs, samples), default=0) * 100 // 16000)))
-                        if out.tell() == BLOCK:
+                            peak = max(map(abs, samples), default=0)
+                            if not voice_detected and peak >= 1000:
+                                voice_detected = True
+                                onset = next(i for i, sample in enumerate(samples) if abs(sample) >= 1000)
+                                events.put(("voice", read_at - (len(samples) - onset) / 16000))
+                            events.put(("level", min(100, peak * 100 // 16000)))
+                        if out.tell() == block:
                             index += 1
             if pause.is_set() and not stop.is_set():
                 events.put(("paused", None))
@@ -226,14 +264,14 @@ def capture(directory, stop, events, device, pause):
         events.put(("capture_error", str(error)))
     finally:
         stop.set()
-        events.put(("stopped", None))
+        events.put(("stopped", time.monotonic()))
 
 
 def play_audio(directory, cancel, events):
     try:
         import sounddevice as sd
         with sd.RawOutputStream(samplerate=16000, channels=1, dtype="int16") as speaker:
-            for fragment in sorted(directory.glob("*.raw")):
+            for fragment in audio_fragments(directory):
                 with fragment.open("rb") as source:
                     while not cancel.is_set():
                         block = source.read(3200)
@@ -256,48 +294,113 @@ def network(cfg, directory, key, events, finished):
         events.put(("retry", ("Check the desktop connection settings and credential file.", False)))
         return
 
+    try:
+        state = json.loads((directory / "editor.json").read_bytes())
+        streaming, task, block = capture_options(state)
+    except (OSError, ValueError, AttributeError):
+        events.put(("retry", ("Could not read the saved recording settings.", False)))
+        return
+    poll_seconds, ui_poll_ms = delivery_intervals(cfg)
+
     path = None
     failures = 0
+    known_received = set()
+    last_result = None
+    stop_seen = False
+    last_poll = 0.0
+    needs_sync = True
+    next_index = 0
+    final_files = None
     while True:
         try:
             done = finished.is_set()
-            files = sorted(directory.glob("*.raw"))
-            ready = [p for p in files if p.stat().st_size == BLOCK or (done and p.stat().st_size >= 2)]
+            newly_stopped = done and not stop_seen
+            stop_seen = done
+            if done:
+                if final_files is None:
+                    final_files = [p for p in audio_fragments(directory) if p.stat().st_size >= 2]
+                ready = final_files
+            else:
+                fragment = directory / f"{next_index:03d}.raw"
+                ready = [fragment] if fragment.exists() and fragment.stat().st_size == block else []
             if path is None and not ready:
                 if done:
                     events.put(("ready", "Empty recording"))
                     return
-                finished.wait(1)
+                finished.wait(.05 if streaming else poll_seconds)
                 continue
             if path is None:
-                session = client.call("POST", "/v1/sessions", headers={"Idempotency-Key": key})
+                start = time.monotonic()
+                options = {}
+                if streaming or task != "translate":
+                    caps = client.call("GET", "/v1/capabilities")
+                    if (streaming and caps.get("stream_fragment_seconds") != STREAM_SECONDS
+                            or task not in caps.get("session_tasks", ())):
+                        events.put(("retry", ("Update the Gateway to sync this saved recording.", False)))
+                        return
+                    options = {"json": {"streaming": streaming, "task": task}}
+                session = client.call("POST", "/v1/sessions", headers={"Idempotency-Key": key}, **options)
                 path = "/v1/sessions/" + session["session_id"]
-            progress = client.call("GET", path)
-            events.put(("segments", progress["segments"]))
-            if progress["state"] == "succeeded":
-                events.put(("ready", "Ready"))
-                return
-            if progress["state"] == "failed":
-                events.put(("retry", ("Gateway could not finish this capture. Retry to reprocess the saved audio.", True)))
-                return
-            received = set(progress["received"])
+                events.put(("session", session["session_id"]))
+                metric("session_open", session["session_id"], duration_ms=elapsed_ms(start),
+                       streaming=streaming, task=task, poll_ms=poll_seconds * 1000, ui_poll_ms=ui_poll_ms)
+            session_id = path.rsplit("/", 1)[-1]
+            if needs_sync or newly_stopped or time.monotonic() - last_poll >= poll_seconds:
+                start = time.monotonic()
+                progress = client.call("GET", path)
+                last_poll = time.monotonic()
+                needs_sync = False
+                known_received.update(progress["received"])
+                while next_index in known_received:
+                    next_index += 1
+                result = (progress["segments"], progress.get("preview", ""))
+                if result != last_result:
+                    events.put(("segments", result[0]))
+                    if streaming:
+                        events.put(("preview", (len(result[0]), result[1])))
+                    if result[1] or any(part["text"] for part in result[0]):
+                        metric("result_fetched", session_id, poll_request_ms=elapsed_ms(start, last_poll),
+                               confirmed_segments=len(result[0]), final=progress["state"] == "succeeded")
+                    last_result = result
+                if progress["state"] == "succeeded":
+                    events.put(("delivered", last_poll))
+                    events.put(("ready", "Ready"))
+                    return
+                if progress["state"] == "failed":
+                    events.put(("retry", ("Gateway could not finish this capture. Retry to reprocess the saved audio.", True)))
+                    return
             for fragment in ready:
                 index = int(fragment.stem)
-                if index in received:
+                if index in known_received:
                     continue
+                start = time.monotonic()
                 with io.BytesIO() as buf:
                     with wave.open(buf, "wb") as wav:
                         wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
                         data = fragment.read_bytes()
                         wav.writeframes(data[:len(data) // 2 * 2])
+                    encoded = time.monotonic()
                     client.call("PUT", path + f"/fragments/{index}", data=buf.getvalue(),
                                 headers={"Content-Type": "audio/wav"})
+                known_received.add(index)
+                while next_index in known_received:
+                    next_index += 1
+                metric("fragment_uploaded", session_id, index=index,
+                       encode_ms=elapsed_ms(start, encoded), upload_ms=elapsed_ms(encoded))
             if done and ready and not progress["closed"]:
+                start = time.monotonic()
                 client.call("POST", path + "/finalize", json={"last_index": int(ready[-1].stem)})
+                progress["closed"] = True
+                metric("finalize_ack", session_id, request_ms=elapsed_ms(start))
             failures = 0
-            time.sleep(1)
+            interval = .05 if streaming and not done else poll_seconds
+            if done:
+                time.sleep(interval)
+            else:
+                finished.wait(interval)
         except requests.HTTPError as error:
             status = error.response.status_code
+            needs_sync = True
             if status in (429, 502, 503, 504) and failures < 2:
                 failures += 1
                 events.put(("notice", "Gateway busy or unavailable. Retrying saved fragments."))
@@ -310,6 +413,7 @@ def network(cfg, directory, key, events, finished):
             events.put(("retry", ("Check the Gateway endpoint, TLS trust and configuration.", False)))
             return
         except (requests.Timeout, requests.ConnectionError):
+            needs_sync = True
             failures += 1
             if failures >= 3:
                 events.put(("retry", ("Gateway offline. Retry this audio or record another.", False)))
@@ -338,7 +442,7 @@ def read_shortcuts(listener, events):
         if message == b"show":
             events.put(("show", None))
         if message == b"toggle":
-            events.put(("toggle", None))
+            events.put(("toggle", time.monotonic()))
 
 
 def run_graphical():
@@ -370,6 +474,7 @@ def graphical(listener):
         from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
 
     cfg = json.loads(CONFIG.read_bytes())
+    _, ui_poll_ms = delivery_intervals(cfg)
     wayland = wayland_session()
     if wayland:
         os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
@@ -413,12 +518,16 @@ def graphical(listener):
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {background:transparent}
         QPushButton {border:1px solid transparent;border-radius:15px;background:transparent}
         QPushButton:hover, QPushButton:focus {background:#393940;border-color:#64646d}
+        QPushButton:pressed {background:#494550}
+        QPushButton:focus {border:1px solid #c9b8ff}
+        QPushButton#task {background:#36323e;color:#e2d9f5;font-weight:bold;border-radius:10px}
+        QPushButton#task:hover, QPushButton#task:focus {border-color:#b7a4d5}
         QPushButton#record {background:#35353d;border-color:#54545e}
         QPushButton#record:focus {border-color:#d4cedf}
         QPushButton#record[recording="true"] {background:#64353c;border-color:#a55d65}
         QPushButton::menu-indicator {image:none}
         QMenu {background:#242429;color:#e4e4e8;border:1px solid #55555d;padding:4px}
-        QMenu::item {padding:6px 12px}
+        QMenu::item {padding:8px 14px;border-radius:6px}
         QMenu::item:selected {background:#43434d}
         QProgressBar {background:#44444a;border:0;border-radius:2px}
         QProgressBar::chunk {background:#ff9aa5;border-radius:2px}
@@ -427,11 +536,11 @@ def graphical(listener):
     outer.setContentsMargins(0, 0, 0, 0)
     sheet = QWidget()
     sheet.setObjectName("pill")
-    sheet.setFixedWidth(360)
+    sheet.setFixedWidth(min(424, app.primaryScreen().availableGeometry().width()))
     outer.addWidget(sheet)
     body = QVBoxLayout(sheet)
-    body.setContentsMargins(14, 8, 14, 8)
-    body.setSpacing(2)
+    body.setContentsMargins(14, 10, 14, 10)
+    body.setSpacing(5)
     editor = QTextEdit()
     editor.setAcceptRichText(False)
     editor.setAccessibleName("Transcript")
@@ -443,13 +552,23 @@ def graphical(listener):
     editor.document().setDocumentMargin(2)
     editor.setFixedHeight(24)
     body.addWidget(editor)
+    provisional = QLabel()
+    provisional.setTextFormat(Qt.PlainText)
+    provisional.setWordWrap(True)
+    provisional.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+    provisional.setMaximumHeight(96)
+    provisional.setAccessibleName("Provisional text")
+    provisional.setStyleSheet("color:#d3c8e7;background:#302d37;border-left:3px solid #ad97ce;padding:4px 8px")
+    provisional.hide()
+    body.addWidget(provisional)
 
     def fit_text(*_):
         height = int(editor.document().size().height()) + 3
         screen = root.screen() or app.primaryScreen()
         available = screen.availableGeometry().height()
         controls = max(32, buttons.sizeHint().height())
-        ceiling = max(24, available - controls - 16 - 2 - 48)
+        preview_height = min(96, provisional.heightForWidth(editor.width())) if not provisional.isHidden() else 0
+        ceiling = max(24, available - controls - 16 - 2 - 48 - preview_height)
         editor.setFixedHeight(max(24, min(height, ceiling)))
         policy = Qt.ScrollBarAsNeeded if height > ceiling else Qt.ScrollBarAlwaysOff
         if editor.verticalScrollBarPolicy() != policy:
@@ -457,7 +576,7 @@ def graphical(listener):
 
     outer.setSizeConstraint(QVBoxLayout.SetFixedSize)
     buttons = QHBoxLayout()
-    buttons.setSpacing(2)
+    buttons.setSpacing(4)
     body.addLayout(buttons)
     status = QLabel("")
     status.setAlignment(Qt.AlignCenter)
@@ -474,8 +593,8 @@ def graphical(listener):
 
     def icon_button(name, symbol):
         button = QPushButton()
-        button.setFixedSize(32, 32)
-        button.setIconSize(QSize(18, 18))
+        button.setFixedSize(36, 36)
+        button.setIconSize(QSize(20, 20))
         set_icon(button, name, symbol)
         return button
 
@@ -527,6 +646,7 @@ def graphical(listener):
         root.show()
         root.raise_()
         root.activateWindow()
+        first_visible()
 
     def indicator(phase):
         status.setStyleSheet("color:" + {"Recording":"#ffa0aa", "Processing":"#edc280", "Ready":"#a2d9c7"}.get(phase, "#cac5df"))
@@ -560,6 +680,19 @@ def graphical(listener):
     working=False
     transfer_active = False
     replace_session = False
+    task = cfg.get("task", "translate")
+    if task not in TASK_LABELS:
+        task = "translate"
+    timing = {}
+
+    def first_visible():
+        if (timing.get("first") or root.isMinimized() or not root.isVisible()
+                or not (provisional.text().strip() or editor.toPlainText().strip())):
+            return
+        timing["first"] = True
+        if timing.get("session"):
+            metric("first_text", timing["session"], start_to_visible_ms=elapsed_ms(timing.get("start")),
+                   voice_to_visible_ms=elapsed_ms(timing.get("voice")))
 
     def save():
         if directory:
@@ -591,13 +724,15 @@ def graphical(listener):
         status.setText("Syncing saved audio")
         transfer()
 
-    def toggle():
-        nonlocal directory,state,working,stop,finished,started,replace_session,capture_thread,paused_at,capture_problem
+    def toggle(pressed=None):
+        nonlocal directory,state,working,stop,finished,started,replace_session,capture_thread,paused_at,capture_problem,timing
+        pressed = pressed if type(pressed) is float else time.monotonic()
         if playback is not None:
             status.setText("Stop playback first")
             return
         if working:
             if not stop.is_set():
+                timing["stop"] = pressed
                 stop.set()
                 status.setText("Finishing recording")
             return
@@ -605,7 +740,9 @@ def graphical(listener):
             status.setText("Processing saved audio")
             return
         new_directory = HOME / secrets.token_hex(16)
-        new_state = {"applied": 0, "ready": False, "created": time.time(), "text": ""}
+        new_state = {"applied": 0, "ready": False, "created": time.time(), "text": "",
+                     "streaming": cfg.get("streaming") is True, "task": task}
+        timing = {"start": pressed}
         try:
             new_directory.mkdir(mode=0o700)
             atomic(new_directory / "editor.json", json.dumps(new_state).encode())
@@ -629,8 +766,14 @@ def graphical(listener):
         finished=threading.Event()
         working=True
         status.setText("Recording")
-        capture_thread = threading.Thread(target=capture, args=(directory, stop, events, cfg["microphone"], pause))
+        provisional.clear()
+        provisional.hide()
+        streaming, _, block = capture_options(state)
+        args = (directory, stop, events, cfg["microphone"], pause)
+        capture_thread = threading.Thread(target=capture, args=args + (block,) if streaming else args)
         capture_thread.start()
+        if streaming:
+            reveal()
         transfer()
 
     def poll():
@@ -641,9 +784,23 @@ def graphical(listener):
         while not events.empty():
             kind,value=events.get()
             if kind=="toggle":
-                toggle()
+                toggle(value)
             elif kind=="show":
                 reveal()
+            elif kind == "session":
+                timing["session"] = value
+            elif kind == "mic_opened":
+                timing["mic_opened"] = value
+            elif kind == "delivered":
+                timing["delivery"] = value
+            elif kind == "voice":
+                timing["voice"] = value
+            elif kind == "preview":
+                confirmed, preview = value
+                provisional.setText(preview if confirmed >= state["applied"] else "")
+                provisional.setVisible(bool(provisional.text()))
+                fit_text()
+                first_visible()
             elif kind == "paused":
                 if not stop.is_set():
                     paused_at = time.monotonic()
@@ -665,9 +822,10 @@ def graphical(listener):
                     status.setText("Paused" if working else "Ready")
                 pause_button.setEnabled(True)
             elif kind=="stopped":
+                timing["captured"] = value
                 finished.set()
                 working = False
-                timer.setInterval(700)
+                timer.setInterval(ui_poll_ms)
                 elapsed.clear()
                 meter.setValue(0)
                 set_recording(False)
@@ -688,6 +846,7 @@ def graphical(listener):
                                 tail.insertText((" " if editor.toPlainText() else "") + part["text"])
                         state["applied"]+=1
                         save()
+                first_visible()
             elif kind=="retry":
                 transfer_active = False
                 message, replace_session = value
@@ -701,6 +860,9 @@ def graphical(listener):
             elif kind=="ready":
                 transfer_active = False
                 working=False
+                provisional.clear()
+                provisional.hide()
+                fit_text()
                 state["ready"]=True
                 save()
                 status.setText(value)
@@ -708,6 +870,17 @@ def graphical(listener):
                 indicator("Ready")
                 if editor.toPlainText().strip():
                     copy_result()
+                if timing.get("session"):
+                    metric("final_text", timing["session"],
+                           useful_text=bool(editor.toPlainText().strip()),
+                           mic_open_ms=elapsed_ms(timing.get("start"), timing["mic_opened"])
+                           if "mic_opened" in timing else None,
+                           stop_to_capture_ms=elapsed_ms(timing.get("stop"), timing.get("captured")),
+                           final_ui_ms=elapsed_ms(timing.get("delivery")),
+                           capture_to_final_ms=elapsed_ms(timing.get("captured")),
+                           stop_to_final_ms=elapsed_ms(timing.get("stop")),
+                           start_to_final_ms=elapsed_ms(timing.get("start")))
+                timer.setInterval(700)
                 if capture_problem:
                     status.setText(capture_problem)
             else:
@@ -779,6 +952,10 @@ def graphical(listener):
     buttons.addWidget(elapsed)
     buttons.addWidget(copy_button)
     buttons.addWidget(recover_button)
+    task_button = QPushButton()
+    task_button.setObjectName("task")
+    task_button.setFixedSize(40, 30)
+    buttons.addWidget(task_button)
     for button in (pause_button, play_button, retry_button):
         button.hide()
 
@@ -797,6 +974,9 @@ def graphical(listener):
         nonlocal directory, state, replace_session
         if working or transfer_active or playback is not None:
             return
+        provisional.clear()
+        provisional.hide()
+        timing.clear()
         directory = saved.parent
         state = json.loads(saved.read_bytes())
         replace_session = state.get("replace_session", False)
@@ -817,13 +997,21 @@ def graphical(listener):
         count = 0
         for created, saved, entry in recordings(HOME):
             size = sum(p.stat().st_size for p in saved.parent.glob("*.raw"))
-            if size < 2:
+            transcript = " ".join(entry.get("text", "").split())
+            if size < 2 and not transcript:
                 continue
             duration = size // 32000
             count += 1
             stamp = time.strftime("%b %d, %H:%M", time.localtime(created))
-            preview = " ".join(entry.get("text", "").split())[:36].replace("&", "&&")
-            label = f"{stamp}   {duration // 60}:{duration % 60:02}   {preview}"
+            title = transcript[:42] + ("…" if len(transcript) > 42 else "")
+            if not title:
+                title = "Saved audio" if entry.get("ready") else "Awaiting transcription"
+            details = [stamp]
+            if size:
+                details.append(f"{duration // 60}:{duration % 60:02}")
+            if entry.get("task") in TASK_LABELS:
+                details.append("ES" if entry["task"] == "transcribe" else "EN")
+            label = title.replace("&", "&&") + "\n" + "  ·  ".join(details)
             recovery.addAction(label, lambda checked=False, file=saved: recover(file))
             if count == 10:
                 break
@@ -832,11 +1020,31 @@ def graphical(listener):
     recovery.aboutToShow.connect(list_recoverable)
     menu.addAction("Record / Stop", toggle)
     menu.addAction("Show editor", reveal)
+    task_menu = QMenu(task_button)
+    task_button.setMenu(task_menu)
+    task_actions = {}
+
+    def select_task(selected):
+        nonlocal task
+        task = selected
+        task_button.setText("ES" if task == "transcribe" else "EN")
+        description = "Next recording: " + TASK_LABELS[task]
+        task_button.setAccessibleName(description)
+        task_button.setToolTip(description)
+        for key, action in task_actions.items():
+            action.setChecked(key == selected)
+
+    for key, label in TASK_LABELS.items():
+        action = task_menu.addAction(label)
+        action.setCheckable(True)
+        action.triggered.connect(lambda checked=False, selected=key: select_task(selected))
+        task_actions[key] = action
+    select_task(task)
     tray.activated.connect(lambda reason: reveal() if reason == QSystemTrayIcon.Trigger else None)
     hotkeys = None
     if not wayland:
         from pynput.keyboard import GlobalHotKeys
-        hotkeys = GlobalHotKeys({cfg.get("hotkey", "<cmd>+<shift>+<f8>"): lambda: events.put(("toggle", None))})
+        hotkeys = GlobalHotKeys({cfg.get("hotkey", "<cmd>+<shift>+<f8>"): lambda: events.put(("toggle", time.monotonic()))})
         hotkeys.start()
     timer = QTimer()
     timer.timeout.connect(poll)

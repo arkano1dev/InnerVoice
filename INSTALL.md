@@ -63,4 +63,6 @@ On your workstation, open a terminal in an Ubuntu Wayland session. The Docker cl
 
 Use `./bin/innervoice-desktop check` to verify the running container can authenticate, `status` for the container state, and `logs` for its output. After updating the checkout, run `./bin/innervoice-desktop update` to rebuild the local image. See the [desktop guide](docs/private-gateway.md#desktop-role) for storage, the tray, and recording controls.
 
+See the [hotkey streaming guide](docs/hotkey-streaming.md) for early text, Spanish transcription, latency measurement and rollback.
+
 To remove the application menu entry, stop the recorder and remove `applications/io.github.arkano1dev.InnerVoice.desktop` and `icons/hicolor/128x128/apps/io.github.arkano1dev.InnerVoice.png` under `${XDG_DATA_HOME:-~/.local/share}`. Remove the optional shortcut in the desktop settings.

@@ -22,6 +22,13 @@ def audio_bytes(home):
     return sum(p.stat().st_size for p in home.glob("*/*.raw"))
 
 
+def audio_fragments(directory):
+    return sorted(
+        (path for path in directory.glob("*.raw") if path.stem.isascii() and path.stem.isdecimal()),
+        key=lambda path: int(path.stem),
+    )
+
+
 def recordings(home):
     entries = []
     for saved in home.glob("*/editor.json"):
@@ -40,7 +47,7 @@ def recordings(home):
 
 def cleanup_candidates(home, keep):
     for _, saved, entry in recordings(home):
-        fragments = sorted(saved.parent.glob("[0-9][0-9][0-9].raw"))
+        fragments = audio_fragments(saved.parent)
         if not any(p.stat().st_size for p in fragments):
             continue
         if keep:

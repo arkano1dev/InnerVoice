@@ -297,7 +297,9 @@ def status(ident):
     if row["state"] == "succeeded":
         with database() as db:
             db.execute("UPDATE performance SET first_served=coalesce(first_served,?) WHERE id=?",(time.time(),ident))
-        body["result"] = dict(text=row["result"],language="en",speech_detected=bool(row["result"]))
+            option = db.execute("SELECT task FROM session_options WHERE id=?", (ident,)).fetchone()
+        language = "es" if option and option["task"] == "transcribe" else "en"
+        body["result"] = dict(text=row["result"],language=language,speech_detected=bool(row["result"]))
     if row["error"]:
         body["error"] = dict(code=row["error"],retryable=False)
     return body
@@ -306,50 +308,107 @@ def status(ident):
 @api.get("/v1/capabilities")
 def capabilities():
     scope = request.environ["innervoice.scope"]
-    return dict(api_version=1,jobs=scope in ("both","jobs"),sessions=scope in ("both","sessions"),fragment_seconds=30,output_language="en")
+    from sessions import STREAM_SECONDS, TASKS
+    body = dict(api_version=1,jobs=scope in ("both","jobs"),sessions=scope in ("both","sessions"),
+                fragment_seconds=30,output_language="en")
+    if body["sessions"]:
+        body.update(stream_fragment_seconds=STREAM_SECONDS, session_tasks=TASKS)
+    return body
 
 
 def finish_error(db, ident, reason):
     db.execute("UPDATE jobs SET state='failed',finished=?,error=? WHERE id=?", (time.time(),reason,ident))
 
 
+def worker_timing(response, header):
+    value = response.headers.get(header, "")
+    return float(value) if len(value) <= 16 and value.replace(".", "", 1).isdigit() else None
+
+
 def process(row):
     ident = row["id"]
     capture = row["digest"] == "capture"
-    path = AUDIO / (f"{ident}.{row['done']}.pcm" if capture else ident + ".pcm")
-    if not path.exists():
+    from sessions import STREAM_BLOCK
+
+    began = time.monotonic()
+    streaming = bool(row["streaming"])
+    index = row["done"]
+    window = BLOCK // STREAM_BLOCK if streaming else 1
+    end = min(index + window, row["total"])
+    preview = bool(row["is_preview"])
+    if preview:
+        end = row["full_until"]
+    task = row["task"] or "translate"
+    if capture:
+        with database() as db:
+            arrival = db.execute(
+                "SELECT max(received) FROM fragment_arrivals WHERE job=? AND idx>=? AND idx<?",
+                (ident,index,end),
+            ).fetchone()[0]
+        queue_ms = round(max(0, time.time() - arrival) * 1000, 1) if arrival is not None else None
+    samples = bytearray()
+    try:
+        if capture:
+            for part in range(index, end):
+                samples.extend((AUDIO / f"{ident}.{part}.pcm").read_bytes())
+        else:
+            with (AUDIO / (ident + ".pcm")).open("rb") as src:
+                src.seek(index * BLOCK)
+                samples.extend(src.read(BLOCK))
+    except FileNotFoundError:
         with database() as db:
             finish_error(db,ident,"input_missing")
         return
     block = io.BytesIO()
-    with path.open("rb") as src, wave.open(block,"wb") as wav:
-        src.seek(0 if capture else row["done"] * BLOCK)
+    with wave.open(block,"wb") as wav:
         wav.setparams((1,2,16000,0,"NONE","not compressed"))
-        samples=src.read(BLOCK)
         wav.writeframes(samples)
-    start=time.monotonic()
+    preparation_ms = telemetry.ms(began)
+    worker_ms = model_ready_ms = 0
+    worker_request_ms = 0
+    lane_wait_ms = 0
+    worker_probe_ms = 0
     if not any(samples):
         segment=""
     else:
+        lane_start = time.monotonic()
         with legacy.inference_lane("jobs"):
+            lane_wait_ms = telemetry.ms(lane_start)
+            if preview:
+                with database() as db:
+                    closed = db.execute("SELECT closed FROM sessions WHERE id=?", (ident,)).fetchone()[0]
+                    if closed:
+                        db.execute("UPDATE jobs SET state='queued' WHERE id=?", (ident,))
+                        return
+            probe_start = time.monotonic()
             ready = legacy.upstream_client.get(legacy.worker_url+"/can-transcribe",allow_redirects=False,timeout=(2,7))
-            if ready.status_code==503:
+            if ready.status_code==503 and not preview:
                 # Busy after an interrupted response is occupancy, not a new inference failure.
                 with database() as db:
                     db.execute("UPDATE jobs SET state='queued',ready=? WHERE id=?",(time.time()+2,ident))
                 return
             ready.raise_for_status()
+            worker_probe_ms = telemetry.ms(probe_start)
             attempt=secrets.token_hex(16)
             tags={"X-Dispatch-Job":ident,"X-Dispatch-Index":str(row["done"]),"X-Dispatch-Token":attempt,"X-Dispatch-Profile":PROFILE}
-            start=time.monotonic()
+            options = {"task": task}
+            if task == "transcribe":
+                options["language"] = "es"
+            start = time.monotonic()
             response = legacy.upstream_client.post(legacy.worker_url+"/transcribe",allow_redirects=False,files={"audio":("segment.wav",block.getvalue(),"audio/wav")},
-                                     data={"task":"translate"},headers=tags,timeout=(2,590))
+                                     data=options,headers=tags,timeout=(2,590))
+            worker_request_ms = telemetry.ms(start)
+            worker_ms = worker_timing(response, "X-Inference-Ms")
+            model_ready_ms = worker_timing(response, "X-Model-Ready-Ms")
             response.raise_for_status()
             if any(response.headers.get(k)!=v for k,v in tags.items()):
                 raise ValueError("Unconfirmed worker dispatch")
         segment = response.json()["text"].strip()
-    retained={word.strip().casefold() for word in os.getenv("IV_RETAINED_TERMS","").split(",") if word.strip()}
-    if segment.strip(" .!?").casefold() not in retained and segment and any(c.isalpha() for c in segment) and detector.detect_language_of(segment) != Language.ENGLISH:
+    inference_finished = time.monotonic()
+    retained = {word.strip().casefold() for word in os.getenv("IV_RETAINED_TERMS", "").split(",") if word.strip()}
+    if (task == "translate" and not preview and segment.strip(" .!?").casefold() not in retained
+            and segment and any(c.isalpha() for c in segment)
+            and detector.detect_language_of(segment) != Language.ENGLISH):
         with database() as db:
             finish_error(db,ident,"english_output_unavailable")
         return
@@ -358,13 +417,28 @@ def process(row):
         current=db.execute("SELECT state,profile,done,total FROM jobs WHERE id=?",(ident,)).fetchone()
         if not current or current["state"]!="processing" or current["done"]!=row["done"] or current["profile"]!=PROFILE:
             return
-        db.execute("UPDATE performance SET inference_seconds=inference_seconds+? WHERE id=?",(time.monotonic()-start,ident))
-        db.execute("INSERT INTO segments VALUES(?,?,?)",(ident,row["done"],segment))
-        now = time.time()
-        db.execute("UPDATE jobs SET done=done+1,state='queued',ready=?,retries=0 WHERE id=?", (now,ident))
-        if row["done"]+1 == current["total"]:
-            if not capture or db.execute("SELECT closed FROM sessions WHERE id=?",(ident,)).fetchone()[0]:
-                publish(db,ident)
+        db.execute("UPDATE performance SET inference_seconds=inference_seconds+? WHERE id=?",
+                   (worker_request_ms / 1000,ident))
+        if preview:
+            db.execute("UPDATE session_options SET preview_until=?,preview=? WHERE id=?",
+                       (end,segment,ident))
+            db.execute("UPDATE jobs SET state='queued',ready=?,retries=0 WHERE id=?", (time.time(),ident))
+        else:
+            db.execute("INSERT INTO segments VALUES(?,?,?)",(ident,index // window,segment))
+            db.execute("UPDATE jobs SET done=?,state='queued',ready=?,retries=0 WHERE id=?",
+                       (end,time.time(),ident))
+            if streaming:
+                db.execute("UPDATE session_options SET preview_until=?,preview='' WHERE id=?", (end,ident))
+            if end == current["total"]:
+                if not capture or db.execute("SELECT closed FROM sessions WHERE id=?",(ident,)).fetchone()[0]:
+                    publish(db,ident)
+    if capture:
+        telemetry.emit("result_available", ident, index=index, until=end, preview=preview,
+                       queue_ms=queue_ms, preparation_ms=preparation_ms, lane_wait_ms=lane_wait_ms,
+                       worker_probe_ms=worker_probe_ms, worker_request_ms=worker_request_ms,
+                       inference_ms=worker_ms, model_ready_ms=model_ready_ms,
+                       publish_ms=telemetry.ms(inference_finished), attempt_to_available_ms=telemetry.ms(began))
+
 
 
 def publish(db,ident):
@@ -405,10 +479,36 @@ def maintain():
                 db.execute("UPDATE performance SET cleanup='complete' WHERE id=?",(row[0],))
         db.execute("DELETE FROM segments WHERE job IN (SELECT id FROM jobs WHERE finished < ?)",(now-setting("result_seconds",3600),))
         db.execute("UPDATE jobs SET state='expired',result=NULL WHERE finished < ?",(now-setting("result_seconds",3600),))
-        for table,key in (("fragments","job"),("sessions","id")):
+        db.execute("""UPDATE session_options SET preview='' WHERE preview!='' AND
+                      id IN (SELECT id FROM jobs WHERE state='expired')""")
+        for table,key in (("fragments","job"),("fragment_arrivals","job"),("session_options","id"),("sessions","id")):
             db.execute(f"DELETE FROM {table} WHERE {key} IN (SELECT id FROM jobs WHERE finished < ?)",(now-setting("result_seconds",3600)-setting("tombstone_seconds",86400),))
         db.execute("DELETE FROM jobs WHERE finished < ?",(now-setting("result_seconds",3600)-setting("tombstone_seconds",86400),))
         db.execute("UPDATE jobs SET state='failed',error='profile_unavailable',finished=? WHERE state='queued' AND profile!=? AND created<?",(now,PROFILE,now-setting("failed_seconds",86400)))
+
+
+def runnable(db):
+    from sessions import STREAM_BLOCK
+
+    # A short last upload is reserved for finalization. Refresh the preview after
+    # the first piece, then after at least two more pieces have arrived.
+    return db.execute("""
+        WITH candidates AS (
+            SELECT j.*,s.closed,o.streaming,o.task,o.preview_until,
+                   coalesce(o.streaming,0) AND NOT s.closed AND j.total-j.done<? AS is_preview,
+                   j.total - EXISTS(
+                       SELECT 1 FROM fragments f WHERE f.job=j.id AND
+                       f.idx=j.total-1 AND f.size<?
+                   ) AS full_until
+            FROM jobs j LEFT JOIN sessions s ON s.id=j.id
+            LEFT JOIN session_options o ON o.id=j.id
+            WHERE j.state='queued' AND j.done<j.total AND j.profile=? AND j.ready<=?
+        )
+        SELECT * FROM candidates
+        WHERE NOT coalesce(streaming,0) OR closed OR total-done>=?
+           OR (full_until>done AND (preview_until=done OR full_until-preview_until>=2))
+        ORDER BY is_preview,ready,created
+    """, (BLOCK//STREAM_BLOCK,STREAM_BLOCK,PROFILE,time.time(),BLOCK//STREAM_BLOCK)).fetchall()
 
 
 def run():
@@ -420,10 +520,12 @@ def run():
                 maintain()
                 maintenance_at = time.monotonic()+(1 if (ROOT/"drain").exists() else 15)
             with database() as db:
-                rows = db.execute("SELECT * FROM jobs WHERE state='queued' AND done<total AND profile=? AND ready<=? ORDER BY ready,created",
-                                  (PROFILE,time.time())).fetchall()
+                rows = runnable(db)
                 owners = sorted({r["owner"] for r in rows})
                 if owners:
+                    if not rows[0]["is_preview"]:
+                        rows = [row for row in rows if not row["is_preview"]]
+                        owners = sorted({row["owner"] for row in rows})
                     owner = next((o for o in owners if o > (last_owner or "")), owners[0])
                     last_owner = owner
                     row = next(r for r in rows if r["owner"] == owner)
@@ -436,7 +538,12 @@ def run():
                 process(row)
             except (requests.RequestException, ValueError, KeyError, OSError):
                 with database() as db:
-                    if row["retries"]+1 >= setting("attempts",3):
+                    if row["is_preview"]:
+                        db.execute("UPDATE session_options SET preview_until=? WHERE id=?",
+                                   (row["full_until"],row["id"]))
+                        db.execute("UPDATE jobs SET state='queued' WHERE id=?", (row["id"],))
+                        telemetry.emit("preview_failed", row["id"], until=row["full_until"])
+                    elif row["retries"]+1 >= setting("attempts",3):
                         finish_error(db,row["id"],"worker_unavailable")
                     else:
                         db.execute("UPDATE jobs SET state='queued',retries=retries+1,ready=? WHERE id=?",(time.time()+2**(1+row["retries"]),row["id"]))

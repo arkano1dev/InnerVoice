@@ -1,5 +1,14 @@
 """Content-free metadata retained separately from result delivery."""
+import json
 import time
+
+
+def ms(start):
+    return round((time.monotonic() - start) * 1000, 1)
+
+
+def emit(event, session, **metrics):
+    print("IV_METRIC " + json.dumps(dict(event=event, session=session, **metrics)), flush=True)
 
 
 def schema(db):

@@ -133,8 +133,12 @@ class WaylandDesktopTests(unittest.TestCase):
         listener.recv.side_effect = [b"unknown", b"toggle", b"toggle", BlockingIOError]
         events = queue.Queue()
         desktop.read_shortcuts(listener, events)
-        self.assertEqual(events.get_nowait(), ("toggle", None))
-        self.assertEqual(events.get_nowait(), ("toggle", None))
+        kind, pressed = events.get_nowait()
+        self.assertEqual(kind, "toggle")
+        self.assertIsInstance(pressed, float)
+        kind, pressed = events.get_nowait()
+        self.assertEqual(kind, "toggle")
+        self.assertIsInstance(pressed, float)
         self.assertTrue(events.empty())
 
     def test_launcher_prints_absolute_shortcut_and_requires_wayland(self):
@@ -256,6 +260,11 @@ class WaylandDesktopTests(unittest.TestCase):
             os.utime(metadata, (1, 1))
             (archived / "000.raw").write_bytes(b"\x01\x00" * 8)
             (home / "current").write_text("previous")
+            transcript_only = home / "cleaned"
+            transcript_only.mkdir()
+            (transcript_only / "editor.json").write_text(
+                '{"created":2,"text":"Saved after audio cleanup","ready":true,"task":"transcribe"}'
+            )
             for i in range(10):
                 older = home / f"older-{i}"
                 older.mkdir()
@@ -321,6 +330,10 @@ class WaylandDesktopTests(unittest.TestCase):
                                        if b.accessibleName() == "Local recording history")
                         history.aboutToShow.emit()
                         observed["count"] = len(history.actions())
+                        observed["cleaned"] = any(
+                            action.text().startswith("Saved after audio cleanup\n") and action.text().endswith("ES")
+                            for action in history.actions()
+                        )
                         previous = next((a for a in history.actions() if "Previous take" in a.text()), None)
                         if previous:
                             previous.trigger()
@@ -356,6 +369,7 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertEqual(observed.get("history"), "Previous take")
             self.assertTrue(observed.get("playable"))
             self.assertEqual(observed["count"], 10)
+            self.assertTrue(observed["cleaned"])
             saved = attempts[-1]
             self.assertTrue((saved / "000.raw").is_file())
             record = json.loads((saved / "editor.json").read_text())
