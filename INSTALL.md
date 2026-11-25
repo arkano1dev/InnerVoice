@@ -13,6 +13,22 @@ On a Linux host, install Docker Engine with Compose v2, Python 3.11+, FFmpeg and
 
 The wizard asks for the server's private IPv4 address, HTTPS port, allowed **client** addresses or Nord names, worker image and model weights. It creates a certificate for the server IP if you have supplied none. Keep the TLS private key, bearer files and model weights on their designated hosts, outside the checkout. Run the [direct smoke check](docs/private-gateway.md#direct-smoke-first) and enable job admission before the first desktop recording.
 
+### Start the server on Ubuntu boot
+
+For a system-wide Docker Engine installation, enable the Docker service after completing the first InnerVoice start:
+
+```bash
+sudo systemctl enable --now docker.service
+systemctl is-enabled docker.service
+./bin/innervoice status
+```
+
+The Gateway, Whisper worker and optional Telegram bot use Compose's `unless-stopped` policy. Leave the containers running before shutdown so Docker can bring them back at boot. After an intentional stop or removal, run `./bin/innervoice start` from the server checkout.
+
+For Faster Whisper, use `./bin/innervoice config worker --engine faster-whisper` to save the built worker image and its local model directory. The Faster Whisper Dockerfile pins PyAV 18.1.0 for compatibility with Faster Whisper 1.2.1. Keep the saved image and model available on the server for future starts.
+
+If the Gateway publishes HTTPS on a Meshnet address, Docker needs that address to be present when it binds the listener. After the first reboot, check `./bin/innervoice status` and send a short test from each client you use. If the Gateway cannot bind its address, check `journalctl -b -u docker.service` and run `./bin/innervoice start` once Meshnet is ready.
+
 ### Direct Meshnet access
 
 Run Meshnet on the server that publishes the Gateway. On that server, allow incoming Meshnet traffic from the workstation. Leave traffic routing and access to LAN devices through a peer disabled. Use the server's Meshnet IPv4 as the bind address and as the HTTPS host if the setup wizard generated the certificate. If you use a Nord name as the HTTPS host, the certificate needs a matching DNS SAN.
