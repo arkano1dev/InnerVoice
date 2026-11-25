@@ -130,6 +130,15 @@ for svc in gateway whisper bot; do
   cid=$("${stack[@]}" ps -q "$svc")
   [[ "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.Config.User}}' "$cid")" == "true $IV_UID:$IV_GID" ]]
   "${stack[@]}" exec -T "$svc" python -c 'import os; assert os.geteuid()>0 and os.getegid()>0; assert int(next(x.split()[1] for x in open("/proc/self/status") if x.startswith("CapEff:")),16)==0; assert any(l.split()[4]=="/tmp" and " - tmpfs " in l for l in open("/proc/self/mountinfo"))'
+  audio_mounts=(/tmp)
+  if [[ "$svc" == bot ]]; then audio_mounts+=(/app/audios); fi
+  "${stack[@]}" exec -T "$svc" python -c '
+import sys
+from pathlib import Path
+from private_memory import require_private_memory
+assert Path("/sys/fs/cgroup/memory.swap.current").read_text().strip() == "0"
+require_private_memory(*sys.argv[1:])
+' "${audio_mounts[@]}"
 done
 "${stack[@]}" exec -T bot python - <<'PY'
 import asyncio, socket

@@ -1160,12 +1160,11 @@ async def audio_worker():
 
 
 async def main():
+    from private_memory import require_private_memory
+
     if os.getuid() == 0 or os.getgid() == 0:
         raise RuntimeError("The bot requires a non-root identity")
-    with open("/proc/swaps") as swaps, open("/proc/self/mountinfo") as mounts:
-        volatile = {line.split()[4] for line in mounts if line.split(" - ")[1].startswith("tmpfs ")}
-        if len(swaps.readlines()) > 1 or not {"/tmp", str(Path(AUDIO_DIR).resolve())} <= volatile:
-            raise RuntimeError("The bot requires swap disabled and RAM-backed audio directories")
+    require_private_memory("/tmp", str(Path(AUDIO_DIR).resolve()))
     load_pending_queue()
     while True:
         audio_worker_task = asyncio.create_task(audio_worker())

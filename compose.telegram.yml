@@ -10,7 +10,9 @@ services:
       - "${IV_SOCKET_DIR:?}:/run/telegram-socket"
       - "${IV_BEARER_FILE:?}:/run/telegram/bearer:ro"
   bot:
-    build: ./bot
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
     restart: unless-stopped
     depends_on: [gateway]
     networks: [BotEgress]
@@ -20,7 +22,9 @@ services:
     security_opt: [no-new-privileges:true]
     ulimits:
       core: 0
+    cgroup: private
     mem_limit: 768m
+    memswap_limit: 768m
     pids_limit: 96
     tmpfs:
       - "/app/audios:size=256m,mode=0700,uid=${IV_UID:?},gid=${IV_GID:?}"

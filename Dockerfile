@@ -14,6 +14,6 @@ FROM runtime
 COPY --from=dependencies /opt/innervoice /opt/innervoice
 COPY --from=dependencies /opt/tiktoken /opt/tiktoken
 ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
-COPY bot/bot.py .
+COPY bot/bot.py private_memory.py ./
 USER 65534:65534
 CMD ["python", "bot.py"]

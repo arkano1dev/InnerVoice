@@ -1,7 +1,7 @@
 name: Private Docker runtime
 on:
   push:
-    branches: [refactor/private-voice-gateway]
+    branches: [main, refactor/private-voice-gateway]
   pull_request:
     branches: [main]
 permissions:
@@ -14,7 +14,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Test the private stack with synthetic audio
         run: |
-          sudo swapoff -a
+          if [ "$(wc -l < /proc/swaps)" -eq 1 ]; then
+            swap_file=$(mktemp /var/tmp/innervoice-swap.XXXXXX)
+            trap 'sudo swapoff "$swap_file"; rm -f "$swap_file"' EXIT
+            dd if=/dev/zero of="$swap_file" bs=1M count=64 status=none
+            mkswap "$swap_file"
+            sudo swapon "$swap_file"
+          fi
+          test "$(wc -l < /proc/swaps)" -gt 1
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends nftables weston pulseaudio pulseaudio-utils
           python3 deploy/egress-policy --gateway 192.0.2.1 --port 9443 | sudo nft -f -

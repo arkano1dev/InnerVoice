@@ -5,11 +5,12 @@ WORKDIR /app
 
 FROM runtime AS dependencies
 RUN apk add --no-cache py3.13-pip && python3.13 -m venv --without-pip /opt/innervoice
-COPY requirements.txt .
+COPY gateway/requirements.txt .
 RUN /usr/bin/python3.13 -m pip --python /opt/innervoice install --no-cache-dir -r requirements.txt
 
 FROM runtime
 COPY --from=dependencies /opt/innervoice /opt/innervoice
-COPY access.py legacy.py jobs.py telemetry.py sessions.py server.py ./
+COPY gateway/access.py gateway/legacy.py gateway/jobs.py gateway/telemetry.py \
+     gateway/sessions.py gateway/server.py private_memory.py ./
 USER 65534:65534
 CMD ["python", "server.py"]

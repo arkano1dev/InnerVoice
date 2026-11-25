@@ -10,7 +10,7 @@ On the server, from a checkout containing this change, run `./bin/innervoice res
 
 ```bash
 docker build -f whisper/Dockerfile.faster --build-arg CT2_ROCM_IMAGE="$CT2_BASE" \
-  -t innervoice-faster:hotkey-stream whisper
+  -t innervoice-faster:hotkey-stream .
 ./bin/innervoice config worker --engine faster-whisper
 ./bin/innervoice restart --engine faster-whisper
 ```

@@ -366,13 +366,14 @@ def create_smoke_client(cfg, directory, created):
 def env(cfg):
     d=cfg["deployment"]
     p=cfg[d["engine"]]
+    spool_mib = cfg["limits"]["quota_mib"] + cfg["limits"]["free_floor_mib"]
     options={f"IV_{k.upper()}":str(v) for group in ("limits","retention","validation") for k,v in cfg[group].items()}
     return dict(os.environ,**options,IV_PUBLISH="0.0.0.0" if d.get("listen_all",False) else d["bind"],IV_FP16=str(p["fp16"]).lower(),IV_BEAM=str(p["beam"]),
                 IV_PREVIOUS=str(p["previous_text"]).lower(),IV_COMPILE=str(p["compile"]).lower(),IV_IDLE=str(p["idle_seconds"]),
                 IV_ENGINE=d["engine"],IV_UID=str(os.getuid()),IV_GID=str(os.getgid()),
                 IV_BIND=d["bind"],IV_ALLOWED_NETWORKS=d["allowed_networks"],IV_PORT=str(d["port"]),IV_ENABLE=str(int(d["enable"])),
                 IV_BEARER_FILE=str(HOME/"telegram"/"gateway-bearer"),
-                IV_RAM_MIB=str(cfg["limits"]["quota_mib"]+cfg["limits"]["free_floor_mib"]),
+                IV_RAM_MIB=str(spool_mib), IV_GATEWAY_MEMORY_MIB=str(2 * spool_mib + 512),
                 IV_IMAGE=p["image"],IV_WEIGHTS=p["weights"],IV_MODEL=p["model"],IV_DIGEST=p["digest"],
                 IV_ACCESS_DIR=str(HOME/"gateway-access"),IV_SOCKET_DIR=str(HOME/"telegram-socket"),
                 IV_DATA=d["data"],IV_SECRETS=d["secrets"],IV_BOT=json.dumps(cfg["bot.defaults"]),
@@ -415,6 +416,22 @@ def verify_worker_gpu(cfg):
             "HSA_OVERRIDE_GFX_VERSION, restore its known-good value in the private .env. "
             "See docs/private-gateway.md#check-rocm-compatibility-with-the-previous-deployment."
         ) from error
+
+
+def verify_private_memory(cfg, services):
+    verifier = (REPO / "private_memory.py").read_text()
+    for service in services:
+        mounts = ("/tmp", "/app/audios") if service == "bot" else ("/tmp",)
+        try:
+            compose(cfg, "exec", "-T", service, "python", "-c",
+                    f"{verifier}\nrequire_private_memory(*{mounts!r})", timeout=12)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            raise ValueError(f"{service}: could not verify private audio memory. "
+                             "Check service status, cgroup v2 swap accounting and audio tmpfs mounts.") from error
+
+
+def host_swap_active():
+    return len(Path("/proc/swaps").read_text().splitlines()) > 1
 
 
 def stop_deployment(cfg):
@@ -506,8 +523,6 @@ def preflight(cfg):
     d=cfg["deployment"]
     if os.getuid() == 0 or os.getgid() == 0:
         raise ValueError("Use a non-root service account and group")
-    if len(Path("/proc/swaps").read_text().splitlines()) > 1:
-        raise ValueError("Disable swap on the Docker host before processing private audio")
     if d.get("telegram"):
         private_directory(HOME/"telegram-socket")
         folder = HOME/"telegram"
@@ -520,6 +535,16 @@ def preflight(cfg):
     image_id = local_image_id(p["image"])
     if p["image_id"] and p["image_id"]!=image_id:
         raise ValueError("The worker image has changed. Run ./bin/innervoice config setup to review the new image.")
+    if host_swap_active():
+        label = subprocess.check_output(
+            ["docker", "image", "inspect", "--format",
+             '{{index .Config.Labels "io.github.arkano1dev.innervoice.private-memory"}}', image_id],
+            text=True,
+        ).strip()
+        if label != "1":
+            raise ValueError("The saved Whisper image requires host swap disabled. "
+                             "Rebuild it from this checkout and pin it with config worker. "
+                             "See docs/private-gateway.md#provision-the-server.")
     if not p["fp16"] and d["engine"]=="faster-whisper":
         raise ValueError("Experimental engine requires float16")
     if p["beam"]<1 or p["idle_seconds"]<0:
@@ -661,6 +686,7 @@ def operate(args):
             preflight(cfg)
             compose(cfg,"up","-d","--no-build","--pull","never","whisper",
                     allowed_networks=client_networks(cfg["deployment"]["allowed_networks"], resolve=True))
+            verify_private_memory(cfg, ["whisper"])
         return
     if args.cmd=="dashboard":
         while True:
@@ -683,11 +709,14 @@ def operate(args):
         compose(active,"build","gateway")
         compose(active,"up","-d","--no-deps","--no-build","--pull","never","gateway",
                 allowed_networks=client_networks(active["deployment"]["allowed_networks"],resolve=True))
+        verify_private_memory(active, ["gateway"])
         print("Gateway updated. Worker and bot kept running; GPU dispatch remains paused.")
         return
     if args.cmd=="gpu-resume":
         latch = Path(active["deployment"]["data"])/"worker-fault"
         if latch.exists():
+            if host_swap_active():
+                verify_private_memory(active, ["gateway", "whisper"] + (["bot"] if active["deployment"]["telegram"] else []))
             # A read timeout abandons the HTTP response, not the native operation.
             # Verify the original worker slot is free before opening the gate.
             check = ("import requests,legacy; assert hasattr(legacy, 'worker_probe'); assert not legacy.gpu_dump_present(); "
@@ -780,6 +809,7 @@ def operate(args):
     atomic(startup, b"1")
     compose(cfg,"up","-d",*(["--force-recreate"] if args.cmd=="restart" else []),"--no-build","--pull","never","--remove-orphans",
             allowed_networks=allowed_networks)
+    verify_private_memory(cfg, ["gateway", "whisper"] + (["bot"] if cfg["deployment"]["telegram"] else []))
     print("Waiting for the Gateway and Whisper to respond…", flush=True)
     probe=("import requests,socket,ssl; c=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); "
            "c.check_hostname=False; c.verify_mode=ssl.CERT_NONE; "

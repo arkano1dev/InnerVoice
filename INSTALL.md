@@ -4,7 +4,7 @@ Start with the [server](#1-set-up-the-gateway). Then connect an [Ubuntu desktop]
 
 ## 1. Set up the Gateway
 
-On a Linux host, install Docker Engine with Compose v2, Python 3.11+, FFmpeg and OpenSSL. Use a non-root operator account, disable host swap for the private audio deployment, and provision a trusted local multilingual checkpoint and a compatible Whisper worker image. Follow the [server provisioning guide](docs/private-gateway.md#provision-the-server) for worker preparation and updates from an existing installation.
+On a Linux host, install Docker Engine with Compose v2, Python 3.11+, FFmpeg and OpenSSL. Use a non-root operator account on Linux with cgroup v2 and the memory swap controller. Provision a trusted local multilingual checkpoint and a compatible Whisper worker image. Host swap may stay enabled when InnerVoice's [private memory checks](docs/private-gateway.md#server-audio-and-telegram) pass. Follow the [server provisioning guide](docs/private-gateway.md#provision-the-server) for worker preparation and updates from an existing installation.
 
 ```bash
 ./bin/innervoice start --setup

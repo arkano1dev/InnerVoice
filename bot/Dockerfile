@@ -5,7 +5,7 @@ WORKDIR /app
 
 FROM runtime AS dependencies
 RUN apk add --no-cache py3.13-pip && python3.13 -m venv --without-pip /opt/innervoice
-COPY requirements-bot.txt .
+COPY bot/requirements-bot.txt .
 RUN /usr/bin/python3.13 -m pip --python /opt/innervoice install --no-cache-dir -r requirements-bot.txt
 ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
 RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" && chmod -R a+rX /opt/tiktoken
@@ -14,6 +14,6 @@ FROM runtime
 COPY --from=dependencies /opt/innervoice /opt/innervoice
 COPY --from=dependencies /opt/tiktoken /opt/tiktoken
 ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
-COPY bot.py .
+COPY bot/bot.py private_memory.py ./
 USER 65534:65534
 CMD ["python", "bot.py"]

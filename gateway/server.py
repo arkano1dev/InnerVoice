@@ -9,6 +9,7 @@ import threading
 from cheroot.wsgi import Server
 from cheroot.ssl.builtin import BuiltinSSLAdapter
 import jobs
+from private_memory import require_private_memory
 import legacy
 import sessions
 
@@ -45,12 +46,7 @@ def main():
     os.umask(0o077)
     if os.getuid() == 0 or os.getgid() == 0:
         raise RuntimeError("The gateway requires a non-root identity")
-    with open("/proc/swaps") as swaps:
-        if len(swaps.readlines()) > 1:
-            raise RuntimeError("Disable swap on the Docker host")
-    with open("/proc/self/mountinfo") as mounts:
-        if not any(line.split()[4] == "/tmp" and line.split(" - ")[1].startswith("tmpfs ") for line in mounts):
-            raise RuntimeError("The server audio spool requires a tmpfs mount at /tmp")
+    require_private_memory("/tmp")
     telegram = os.environ.get("IV_TELEGRAM") == "1"
     if telegram:
         internal = Server("/run/telegram-socket/gateway.sock", wait_for_activation(legacy.app), numthreads=4)

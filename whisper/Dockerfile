@@ -6,12 +6,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements-service.txt /tmp/requirements-service.txt
+COPY whisper/requirements-service.txt /tmp/requirements-service.txt
 RUN python -c "from importlib.metadata import version; print('torch==' + version('torch'))" > /tmp/torch-constraint.txt && \
     python -m pip install --no-cache-dir -c /tmp/torch-constraint.txt -r /tmp/requirements-service.txt
 
 WORKDIR /app
-COPY whisper_server.py /app/
+COPY whisper/whisper_server.py private_memory.py ./
+LABEL io.github.arkano1dev.innervoice.private-memory="1"
 
 EXPOSE 9000
 ENV WHISPER_MODEL=medium

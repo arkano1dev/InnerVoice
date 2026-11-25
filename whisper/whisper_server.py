@@ -7,6 +7,7 @@ import subprocess
 import logging
 import threading
 from flask import Flask, request, jsonify
+from private_memory import require_private_memory
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -20,11 +21,7 @@ if not weights or not os.path.exists(weights):
     raise ValueError("Mount a trusted local model and configure WHISPER_LOCAL_WEIGHTS")
 if os.getuid() == 0 or os.getgid() == 0:
     raise RuntimeError("Private inference requires a non-root identity")
-with open("/proc/swaps") as swaps, open("/proc/self/mountinfo") as mounts:
-    if len(swaps.readlines()) > 1 or not any(
-        row.split()[4] == "/tmp" and row.split(" - ")[1].startswith("tmpfs ") for row in mounts
-    ):
-        raise RuntimeError("Private inference requires RAM-backed temporary storage and swap disabled")
+require_private_memory("/tmp")
 tempfile.tempdir = "/tmp"
 if model_size.endswith(".en") or "turbo" in model_size:
     raise ValueError("Selected weights must support speech-to-English translation")
