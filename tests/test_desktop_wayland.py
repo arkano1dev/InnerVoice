@@ -322,6 +322,19 @@ class WaylandDesktopTests(unittest.TestCase):
                     app.sendEvent(editor.viewport(), QtCore.QEvent(QtCore.QEvent.Enter))
                     def check_after_copy_delay():
                         observed["after_auto"] = widget.isVisible() and not widget.isMinimized()
+                        widget.showMinimized()
+                        editor.setPlainText("Long dictation with wrapping. " * 400)
+                        widget.showNormal()
+                        app.processEvents()
+                        app.processEvents()
+                        observed["separate"] = (
+                            editor.mapTo(widget, editor.rect().bottomLeft()).y()
+                            < copy.mapTo(widget, copy.rect().topLeft()).y()
+                            and widget.rect().contains(copy.mapTo(widget, copy.rect().bottomRight()))
+                        )
+                        task_button = widget.findChild(QtWidgets.QPushButton, "task")
+                        task_button.menu().actions()[0].trigger()
+                        observed["live"] = (home / "live-preview").read_text()
                         editor.setPlainText("Edited note")
                         copy.click()
                         observed["clipboard"] = app.clipboard().text()
@@ -370,6 +383,8 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertTrue(observed.get("playable"))
             self.assertEqual(observed["count"], 10)
             self.assertTrue(observed["cleaned"])
+            self.assertTrue(observed["separate"])
+            self.assertEqual(observed["live"], "1")
             saved = attempts[-1]
             self.assertTrue((saved / "000.raw").is_file())
             record = json.loads((saved / "editor.json").read_text())

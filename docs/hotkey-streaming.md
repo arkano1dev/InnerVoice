@@ -27,6 +27,8 @@ On the Ubuntu desktop, from the checkout containing this change:
 ./bin/innervoice-desktop show
 ```
 
+Open the **EN/ES** button and check **Live text while recording** to enable streaming for the next recording. The editor remembers this choice across restarts. Clear it to return to standard mode. The menu choice overrides the streaming flag in settings.json. For the A–D comparison below, set the menu to match each run.
+
 The existing shortcut still toggles capture. The language button in the editor lets you choose **Transcribe Spanish** or **Translate to English** for the next recording. The `task` setting supplies the default when the app restarts. Saved recordings retain their original task and fragment size when retried.
 
 ## Compare one variable at a time

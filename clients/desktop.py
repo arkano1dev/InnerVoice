@@ -491,10 +491,18 @@ def graphical(listener):
             event.ignore()
             self.showMinimized()
 
+        def showEvent(self, event):
+            super().showEvent(event)
+            QTimer.singleShot(0, restore_layout)
+
         def resizeEvent(self, event):
             super().resizeEvent(event)
-            if self.isVisible() and event.oldSize().isValid() and not wayland:
-                self.move(self.x(), self.y() + event.oldSize().height() - event.size().height())
+            if wayland or not self.isVisible() or self.isMinimized():
+                return
+            area = self.screen().availableGeometry()
+            frame = self.frameGeometry()
+            if frame.bottom() > area.bottom():
+                self.move(self.x(), max(area.top(), area.bottom() - frame.height() + 1))
 
         def mousePressEvent(self, event):
             if event.button() == Qt.LeftButton and self.windowHandle().startSystemMove():
@@ -503,11 +511,12 @@ def graphical(listener):
             super().mousePressEvent(event)
 
     root = RecorderWindow(None, Qt.Window | Qt.FramelessWindowHint)
-    root.setAttribute(Qt.WA_TranslucentBackground)
+    root.setObjectName("recorderWindow")
     root.setWindowTitle("InnerVoice")
     root.setWindowIcon(app_icon)
     root.setStyleSheet("""
-        QWidget#pill {background:rgba(22,22,25,226);border:1px solid #47474e;border-radius:26px}
+        QWidget#recorderWindow {background:#17171b}
+        QWidget#pill {background:#19191d;border:1px solid #47474e;border-radius:26px}
         QLabel {color:#bfbfc7;font-size:12px;background:transparent}
         QTextEdit {background:transparent;color:#e3e3e7;border:0;padding:0;font-size:15px;
                    selection-background-color:#535065}
@@ -563,10 +572,12 @@ def graphical(listener):
     body.addWidget(provisional)
 
     def fit_text(*_):
+        if root.isMinimized():
+            return
         height = int(editor.document().size().height()) + 3
         screen = root.screen() or app.primaryScreen()
         available = screen.availableGeometry().height()
-        controls = max(32, buttons.sizeHint().height())
+        controls = max(36, footer.sizeHint().height(), footer.heightForWidth(sheet.width() - 28))
         preview_height = min(96, provisional.heightForWidth(editor.width())) if not provisional.isHidden() else 0
         ceiling = max(24, available - controls - 16 - 2 - 48 - preview_height)
         editor.setFixedHeight(max(24, min(height, ceiling)))
@@ -574,10 +585,23 @@ def graphical(listener):
         if editor.verticalScrollBarPolicy() != policy:
             editor.setVerticalScrollBarPolicy(policy)
 
+    def restore_layout():
+        if root.isMinimized():
+            return
+        body.invalidate()
+        body.activate()
+        fit_text()
+        outer.activate()
+        root.adjustSize()
+        sheet.update()
+        editor.viewport().update()
+
     outer.setSizeConstraint(QVBoxLayout.SetFixedSize)
-    buttons = QHBoxLayout()
+    footer = QWidget(sheet)
+    buttons = QHBoxLayout(footer)
+    buttons.setContentsMargins(0, 0, 0, 0)
     buttons.setSpacing(4)
-    body.addLayout(buttons)
+    body.addWidget(footer)
     status = QLabel("")
     status.setAlignment(Qt.AlignCenter)
     status.setWordWrap(True)
@@ -1021,6 +1045,26 @@ def graphical(listener):
     menu.addAction("Record / Stop", toggle)
     menu.addAction("Show editor", reveal)
     task_menu = QMenu(task_button)
+    live_setting = HOME / "live-preview"
+    if live_setting.is_file():
+        cfg["streaming"] = live_setting.read_text().strip() == "1"
+    live_preview = task_menu.addAction("Live text while recording")
+    live_preview.setCheckable(True)
+    live_preview.setChecked(cfg.get("streaming") is True)
+
+    def toggle_preview(enabled):
+        try:
+            atomic(live_setting, b"1" if enabled else b"0")
+        except OSError:
+            with QSignalBlocker(live_preview):
+                live_preview.setChecked(cfg.get("streaming") is True)
+            status.setText("Could not save live preview setting")
+            return
+        cfg["streaming"] = enabled
+        status.setText("Live preview on next recording" if enabled else "Standard mode next recording")
+
+    live_preview.toggled.connect(toggle_preview)
+    task_menu.addSeparator()
     task_button.setMenu(task_menu)
     task_actions = {}
 
