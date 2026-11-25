@@ -1,6 +1,7 @@
 """Internal compatibility listener for the existing Compose bot."""
 
 import os
+import time
 import hmac
 import json
 from pathlib import Path
@@ -21,7 +22,7 @@ legacy_slot = BoundedSemaphore(1)
 condition = Condition()
 waiting = {"jobs": 0, "legacy": 0}
 active = None
-previous = None
+
 
 # Both callers submit bounded audio segments. A hung native thread can keep
 # Gunicorn and its HTTP connection alive long after the GPU has reset.
@@ -87,20 +88,57 @@ def check_dispatch(response):
             raise WorkerFault("gpu_oom")
 
 
+class DesktopPriority(Exception):
+    pass
+
+
+def desktop_active():
+    from jobs import database
+    # Reserve the gaps between uploads. Expire an abandoned open recording
+    # after one transport interval plus six seconds of network jitter.
+    with database() as db:
+        return bool(db.execute("""
+            SELECT 1 FROM jobs j JOIN sessions s ON s.id=j.id
+            LEFT JOIN session_options o ON o.id=j.id
+            WHERE j.state IN ('queued','processing') AND (
+                s.closed OR
+                coalesce((SELECT max(received) FROM fragment_arrivals WHERE job=j.id), j.created)
+                >= ? - CASE WHEN o.streaming THEN 8 ELSE 36 END
+            ) LIMIT 1
+        """, (time.time(),)).fetchone())
+
+
 @contextmanager
 def inference_lane(lane):
-    global active, previous
-    other = "legacy" if lane == "jobs" else "jobs"
+    global active
     with condition:
         waiting[lane] += 1
-        condition.wait_for(lambda: active is None and not (waiting[other] and previous == lane))
-        waiting[lane] -= 1
-        active = lane
+        try:
+            if lane == "jobs":
+                condition.wait_for(lambda: active is None)
+            else:
+                # The bot gives each request 600 seconds. Keep the current
+                # segment pending within that budget, including inference.
+                deadline = time.monotonic() + max(0, 590 - INFERENCE_TIMEOUT)
+                while True:
+                    if fault_marker().exists():
+                        raise WorkerFault("worker_protection_active")
+                    if fault_marker().with_name("drain").exists():
+                        raise DesktopPriority()
+                    if active is None and not waiting["jobs"] and not desktop_active():
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise DesktopPriority()
+                    condition.wait(min(remaining, 0.5))
+            active = lane
+        finally:
+            waiting[lane] -= 1
     try:
         yield
     finally:
         with condition:
-            previous, active = lane, None
+            active = None
             condition.notify_all()
 
 
@@ -170,6 +208,8 @@ def transcribe():
             return jsonify(error="gpu_busy",message="Service draining"),503
         with inference_lane("legacy"), guarded_dispatch():
             return forward("/transcribe", timeout=INFERENCE_TIMEOUT)
+    except DesktopPriority:
+        return jsonify(error="background_wait"), 503
     except WorkerFault:
         return jsonify(error="worker_protection_active"), 503
     finally:
@@ -182,7 +222,9 @@ def worker_probe(path, timeout):
     if fault_marker().with_name("startup-pending").exists():
         return jsonify(can_transcribe=False, error="admission_disabled"), 503
     with condition:
-        if active is not None or any(waiting.values()):
+        if fault_marker().exists():
+            return jsonify(can_transcribe=False, error="worker_protection_active"), 503
+        if active is not None or any(waiting.values()) or desktop_active():
             return jsonify(can_transcribe=False, error="gpu_busy"), 503
         active = "probe"
     try:

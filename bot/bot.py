@@ -285,6 +285,10 @@ def _evict_old_last_processed():
         del last_processed[k]
 
 
+class BackgroundWait(Exception):
+    """Retry the current segment and task after interactive work yields."""
+
+
 class WhisperBusyError(Exception):
     """Raised when Whisper API returns 503 gpu_busy."""
 
@@ -821,6 +825,8 @@ async def _call_whisper_api(
                         try:
                             body = await resp.json()
                             err = body.get("error")
+                            if err == "background_wait":
+                                raise BackgroundWait()
                             if err in ("gpu_busy", "gpu_oom"):
                                 raise WhisperBusyError(body.get("message", "GPU busy"))
                         except aiohttp.ContentTypeError:
@@ -867,7 +873,11 @@ async def process_audio_chunk(
     segment: Path, task: str = "transcribe", language: str = None, return_segments: bool = False
 ) -> dict:
     """Process a single audio chunk via Whisper API."""
-    return await _call_whisper_api(segment, task, language, return_segments)
+    while True:
+        try:
+            return await _call_whisper_api(segment, task, language, return_segments)
+        except BackgroundWait:
+            await asyncio.sleep(2)
 
 
 async def process_audio_async(

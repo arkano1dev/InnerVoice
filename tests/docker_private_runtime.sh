@@ -139,6 +139,23 @@ from unittest.mock import patch
 import bot
 
 
+async def check_background_retry():
+    from unittest.mock import AsyncMock
+    segment = Path("/tmp/fixture.wav")
+    with patch.object(bot, "_call_whisper_api", new_callable=AsyncMock) as send, patch.object(bot.asyncio, "sleep", new_callable=AsyncMock):
+        send.side_effect = [bot.BackgroundWait(), {"text": "finished"}]
+        assert await bot.process_audio_chunk(segment, "translate", None, False) == {"text": "finished"}
+        assert send.await_count == 2
+        assert send.await_args_list[0] == send.await_args_list[1]
+        send.side_effect = bot.WhisperBusyError("worker protection active")
+        try:
+            await bot.process_audio_chunk(segment, "translate", None, False)
+        except bot.WhisperBusyError:
+            pass
+        else:
+            raise AssertionError("A real worker fault must leave the background retry loop")
+
+
 async def check_voice_download():
     voice = SimpleNamespace(file_id="fixture-voice", file_size=5, duration=1)
     message = SimpleNamespace(from_user=SimpleNamespace(id=bot.AUTHORIZED_USER), voice=voice)
@@ -169,6 +186,7 @@ async def check():
     bot.overrides.clear()
     await bot.sync_preferences()
     assert bot.preferences(bot.AUTHORIZED_USER)["language"] == "en"
+    await check_background_retry()
     await check_voice_download()
     for uid, chat_type, expected in ((bot.AUTHORIZED_USER,"private",True), (bot.AUTHORIZED_USER+1,"private",False), (bot.AUTHORIZED_USER,"group",False)):
         event = SimpleNamespace(from_user=SimpleNamespace(id=uid), chat=SimpleNamespace(type=chat_type))

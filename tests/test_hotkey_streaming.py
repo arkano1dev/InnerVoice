@@ -335,6 +335,51 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(list(events.queue)[-1], ("retry", (desktop.GPU_PAUSED, True)))
         self.assertFalse({"segments", "replacement", "preview"} & {kind for kind, _ in events.queue})
 
+    def test_live_session_reserves_preview_gaps_and_releases_after_final(self):
+        path = self.create("priority", json={"streaming": True})
+        legacy = jobs.legacy
+        self.enterContext(patch.object(legacy.app, "before_request_funcs", {}))
+        self.enterContext(patch.dict(legacy.os.environ, ENABLE_JOBS="1"))
+        client = legacy.app.test_client()
+        self.assertEqual(client.get("/can-transcribe").json["error"], "gpu_busy")
+
+        # Keep a real Telegram request waiting while the hotkey gets two turns.
+        checked = threading.Event()
+        inspect = legacy.desktop_active
+
+        def check():
+            busy = inspect()
+            checked.set()
+            return busy
+
+        from concurrent.futures import ThreadPoolExecutor
+        with patch.object(legacy, "desktop_active", side_effect=check), ThreadPoolExecutor(1) as pool:
+            with patch.object(legacy, "forward", return_value={"text": "telegram"}) as forward:
+                pending = pool.submit(legacy.app.test_client().post, "/transcribe")
+                try:
+                    self.assertTrue(checked.wait(2))
+                    self.upload(path, 0, b"\x01\x00" * (sessions.STREAM_BLOCK // 2))
+                    self.process(preview=True)
+                    self.assertFalse(pending.done())
+                    self.call("POST", path + "/finalize", json={"last_index": 0})
+                    self.assertTrue(inspect())
+                    self.process(preview=False)
+                    self.assertEqual(pending.result(timeout=3).json, {"text": "telegram"})
+                    forward.assert_called_once()
+                finally:
+                    legacy.fault_marker().touch()
+
+    def test_disconnected_open_stream_expires_and_new_fragment_restores_priority(self):
+        path = self.create("abandoned", json={"streaming": True})
+        with jobs.database() as db:
+            db.execute("UPDATE jobs SET created=0")
+        self.assertFalse(jobs.legacy.desktop_active())
+        self.upload(path, 0, b"\x01\x00" * (sessions.STREAM_BLOCK // 2))
+        self.assertTrue(jobs.legacy.desktop_active())
+        with jobs.database() as db:
+            db.execute("UPDATE fragment_arrivals SET received=0")
+        self.assertFalse(jobs.legacy.desktop_active())
+
     def test_numeric_fragment_order_survives_three_digit_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)

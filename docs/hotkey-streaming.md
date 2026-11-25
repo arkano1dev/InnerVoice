@@ -113,3 +113,9 @@ From the server checkout, run `./bin/innervoice-incident --since 3h` before chan
 Use `./bin/innervoice gpu-pause` to hold new dispatch during inspection. The Gateway marks unfinished server jobs failed during a fault. Desktop PCM remains available for playback and retry. The Telegram bot stores pending audio on tmpfs, so preserve its running container. The worker's own idle unloading and native teardown act independently of the Gateway.
 
 After host recovery, keep the same image, weights, decoder settings and short spoken sample. With the pending queue held and no request in flight, try a new Telegram note alone, then a standard desktop take alone, then the same desktop take with live previews. Finish with one new Telegram note alongside a live take only if each isolated run succeeds. Record task, sample duration, cold/warm model state, time to result, worker requests and kernel events. Stop at the first new fault.
+
+### Desktop priority and background Telegram notes
+
+The Gateway grants one worker request at a time. A Telegram segment in flight can finish. Once the Gateway receives a desktop session, subsequent Telegram segments and queue-readiness polls yield through the gaps between previews and through final processing. An open session that stops uploading releases its reservation after 8 seconds for live uploads or 36 seconds for standard uploads. New fragments restore priority. The Gateway first learns about a recording when the desktop opens its remote session.
+
+Telegram waits between worker requests, including between transcription and translation of a Full segment. If the wait approaches the bot HTTP deadline, an updated bot sleeps asynchronously and retries that same segment and task. The previous bot can return the note to its pending list on such an extended wait. A real worker fault still engages the shared pause and the existing audio retention flow.
