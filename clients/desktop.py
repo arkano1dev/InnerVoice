@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Ubuntu graphical client. Capture, network, and UI use independent threads."""
+from collections import deque
 from difflib import SequenceMatcher
 import re
 import fcntl
@@ -291,6 +292,10 @@ def capture(directory, stop, events, device, pause, block=BLOCK):
                                 onset = next(i for i, sample in enumerate(samples) if abs(sample) >= 1000)
                                 events.put(("voice", read_at - (len(samples) - onset) / 16000))
                             events.put(("level", min(100, peak * 100 // 16000)))
+                            # Display bins cover 25 ms each; recording and upload blocks are unchanged.
+                            envelope = tuple(max(map(abs, samples[i:i + 400])) / 32768
+                                             for i in range(0, len(samples), 400))
+                            events.put(("waveform", envelope))
                         if out.tell() == block:
                             index += 1
             if pause.is_set() and not stop.is_set():
@@ -525,13 +530,13 @@ def run_graphical():
 
 def graphical(listener):
     if os.environ.get('IV_DESKTOP_QT') == '6':
-        from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QEvent
-        from PySide6.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
-        from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
+        from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QEvent, QSize
+        from PySide6.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor, QPainterPath, QLinearGradient, QBrush
+        from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QSystemTrayIcon, QMenu
     else:
-        from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QEvent
-        from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
-        from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSystemTrayIcon, QMenu
+        from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QEvent, QSize
+        from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor, QPainterPath, QLinearGradient, QBrush
+        from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QSystemTrayIcon, QMenu
 
     cfg = json.loads(CONFIG.read_bytes())
     _, ui_poll_ms = delivery_intervals(cfg)
@@ -571,42 +576,102 @@ def graphical(listener):
     root.setWindowIcon(app_icon)
     root.setStyleSheet("""
         QWidget#recorderWindow {background:transparent}
-        QWidget#pill {background:rgba(26,27,34,237);border:1px solid rgba(148,151,170,95);border-radius:20px}
-        QLabel {color:#bfbfc7;font-size:12px;background:transparent}
-        QTextEdit {background:transparent;color:#e3e3e7;border:0;padding:0;font-size:15px;
-                   selection-background-color:#535065}
-        QScrollBar:vertical {background:transparent;width:8px;margin:2px 0}
-        QScrollBar::handle:vertical {background:#73737e;border-radius:3px;min-height:25px;margin:0 1px}
-        QScrollBar::handle:vertical:hover {background:#a2a2ad}
+        QWidget#surface {background:#191c20;border:1px solid #3c4147;border-radius:17px}
+        QWidget#surface[glass="true"] {background:rgba(25,28,32,246)}
+        QLabel {color:#b9c1c7;background:transparent;font-size:12px}
+        QLabel#phase {font-size:14px;font-weight:600}
+        QLabel#clock {font-family:monospace;font-size:14px;color:#d4dadd}
+        QTextEdit {background:#101315;color:#edf0ef;border:1px solid #303639;
+                   border-radius:9px;padding:4px 7px;font-size:15px;selection-background-color:#37695d}
+        QTextEdit:focus {border-color:#81baa9}
+        QScrollBar:vertical {background:transparent;width:8px;margin:6px 0}
+        QScrollBar::handle:vertical {background:#71817d;border-radius:3px;min-height:22px;margin:0 1px}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {height:0}
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {background:transparent}
-        QPushButton {padding:0;margin:0;text-align:center;border:1px solid transparent;border-radius:15px;background:transparent}
-        QPushButton:hover, QPushButton:focus {background:#393940;border-color:#64646d}
-        QPushButton:pressed {background:#494550}
-        QPushButton:focus {border:1px solid #c9b8ff}
-        QPushButton#windowControl {color:#bfbfc7;border-radius:10px;font-size:15px}
-        QPushButton#windowControl:hover {color:#ffffff;background:#41424a}
-        QPushButton#task {background:#36323e;color:#e2d9f5;font-weight:bold;border-radius:10px}
-        QPushButton#task:hover, QPushButton#task:focus {border-color:#b7a4d5}
-        QPushButton#record {background:#35353d;border-color:#54545e}
-        QPushButton#record:focus {border-color:#d4cedf}
-        QPushButton#record[recording="true"] {background:#64353c;border-color:#a55d65}
+        QPushButton {background:#272c30;color:#eef3f1;border:1px solid #41494c;
+                     border-radius:9px;padding:0;font-size:13px;font-weight:600}
+        QPushButton:hover {background:#363e41}
+        QPushButton:pressed {background:#424b4d}
+        QPushButton#record {background:#abd9c6;color:#152720}
+        QPushButton#record[recording="true"] {background:#f2ada4;color:#311917}
+        QPushButton:focus, QPushButton#record:focus {border:2px solid #efdfab}
+        QPushButton:disabled {color:#92999c}
         QPushButton::menu-indicator {image:none}
-        QMenu {background:#242429;color:#e4e4e8;border:1px solid #55555d;padding:4px}
-        QMenu::item {padding:8px 14px;border-radius:6px}
-        QMenu::item:selected {background:#43434d}
-        QProgressBar {background:#44444a;border:0;border-radius:2px}
-        QProgressBar::chunk {background:#ff9aa5;border-radius:2px}
+        QMenu {background:#24292c;color:#edf2f0;border:1px solid #50585a;padding:4px}
+        QMenu::item {padding:8px 18px;border-radius:5px}
+        QMenu::item:selected {background:#40554e}
     """)
     outer = QVBoxLayout(root)
     outer.setContentsMargins(0, 0, 0, 0)
-    sheet = QWidget()
-    sheet.setObjectName("pill")
+    class RecorderSurface(QWidget):
+        # The layout leaves this strip free around all four sides, including corners.
+        def mousePressEvent(self, event):
+            inner = self.rect().adjusted(12, 12, -12, -12)
+            if event.button() == Qt.LeftButton and not inner.contains(event.pos()):
+                handle = self.window().windowHandle()
+                if handle and handle.startSystemMove():
+                    event.accept()
+                    return
+            super().mousePressEvent(event)
+
+    sheet = RecorderSurface()
+    sheet.setObjectName("surface")
     sheet.setAttribute(Qt.WA_StyledBackground)
     outer.addWidget(sheet)
     body = QVBoxLayout(sheet)
-    body.setContentsMargins(10, 6, 10, 6)
-    body.setSpacing(5)
+    body.setContentsMargins(12, 12, 12, 12)
+    body.setSpacing(6)
+    header = QHBoxLayout()
+    header.setSpacing(6)
+    body.addLayout(header)
+    phase_label = QLabel("Ready")
+    phase_label.setObjectName("phase")
+    phase_label.setToolTip("Drag the edge to move InnerVoice")
+    elapsed = QLabel("00:00")
+    elapsed.setObjectName("clock")
+    elapsed.setAccessibleName("Recording duration")
+    header.addWidget(phase_label)
+    header.addWidget(elapsed)
+    header.addStretch()
+
+    class Waveform(QWidget):
+        """Filled envelope of the latest PCM peaks, newest on the right."""
+        def __init__(self):
+            super().__init__()
+            self.peaks = deque(maxlen=136)
+            self.setFixedHeight(26)
+            self.setAccessibleName("Microphone level history")
+
+        def paintEvent(self, event):
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            mid = self.height() / 2
+            right = self.width() - 2
+            painter.setPen(QPen(QColor("#3c4847"), 1))
+            painter.drawLine(2, int(mid), right, int(mid))
+            peaks = list(self.peaks)[-max(1, right // 4):]
+            if peaks:
+                # A continuous silhouette with zero amplitude at silence.
+                steps = [min(mid - 1, (mid - 1) * peak ** .65) for peak in peaks]
+                x0 = right - 4 * (len(steps) - 1)
+                shape = QPainterPath()
+                shape.moveTo(x0, mid - steps[0])
+                for i in range(1, len(steps)):
+                    x = x0 + 4 * i
+                    shape.cubicTo(x - 2, mid - steps[i-1], x - 2, mid - steps[i], x, mid - steps[i])
+                shape.lineTo(right, mid + steps[-1])
+                for i in range(len(steps) - 2, -1, -1):
+                    x = x0 + 4 * i
+                    shape.cubicTo(x + 2, mid + steps[i+1], x + 2, mid + steps[i], x, mid + steps[i])
+                shape.closeSubpath()
+                ink = QLinearGradient(0, 0, right, 0)
+                ink.setColorAt(0, QColor("#547a70"))
+                ink.setColorAt(1, QColor("#a6dac7"))
+                painter.fillPath(shape, QBrush(ink))
+            painter.end()
+
+    meter = Waveform()
+    body.addWidget(meter)
     editor = QTextEdit()
     editor.setAcceptRichText(False)
     editor.setAccessibleName("Transcript")
@@ -616,13 +681,13 @@ def graphical(listener):
     palette.setColor(QPalette.PlaceholderText, QColor("#aaaab4"))
     editor.setPalette(palette)
     editor.document().setDocumentMargin(2)
-    editor.setMinimumSize(40, 36)
+    editor.setMinimumSize(40, 72)
     editor.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
     body.addWidget(editor, 1)
     footer = QWidget(sheet)
     buttons = QHBoxLayout(footer)
     buttons.setContentsMargins(0, 0, 0, 0)
-    buttons.setSpacing(4)
+    buttons.setSpacing(6)
     body.addWidget(footer)
     class RecorderStatus(QLabel):
         def setText(self, text):
@@ -630,19 +695,12 @@ def graphical(listener):
             self.setVisible(bool(text))
 
     status = RecorderStatus("")
-    status.setAlignment(Qt.AlignCenter)
+    status.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+    status.setTextFormat(Qt.PlainText)
     status.setWordWrap(True)
-    status.setMaximumHeight(status.fontMetrics().lineSpacing() * 3)
     status.setMinimumWidth(0)
-    body.insertWidget(1, status)
-    elapsed = QLabel()
-    meter = QProgressBar()
-    meter.setTextVisible(False)
-    meter.setFixedSize(20, 3)
-    meter.setRange(0, 100)
-    meter.setValue(0)
-    meter.setAccessibleName("Microphone level")
-    meter.hide()
+    body.addWidget(status)
+    status.setText("")
 
     def icon_button(name, symbol):
         button = QPushButton()
@@ -667,7 +725,18 @@ def graphical(listener):
         painter.scale(2, 2)
         color = QColor("#efedf3")
         painter.setPen(QPen(color, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        if symbol == "mic":
+        if symbol in ("expand", "restore"):
+            for offset in (0, 180):
+                painter.save()
+                painter.translate(12, 12)
+                painter.rotate(offset)
+                painter.drawLine(2, -2, 8, -8)
+                corner = 8 if symbol == "expand" else 2
+                reach = 2 if symbol == "expand" else 8
+                painter.drawLine(corner, -corner, reach, -corner)
+                painter.drawLine(corner, -corner, corner, -reach)
+                painter.restore()
+        elif symbol == "mic":
             painter.drawRoundedRect(9, 2, 6, 12, 3, 3)
             painter.drawArc(5, 5, 14, 13, 180 * 16, 180 * 16)
             painter.drawLine(12, 18, 12, 21)
@@ -710,7 +779,8 @@ def graphical(listener):
         first_visible()
 
     def indicator(phase):
-        status.setStyleSheet("color:" + {"Recording":"#ffa0aa", "Processing":"#edc280", "Ready":"#a2d9c7"}.get(phase, "#cac5df"))
+        phase_label.setText(phase)
+        phase_label.setStyleSheet("color:" + {"Recording":"#ffa0aa", "Processing":"#edc280", "Ready":"#a2d9c7"}.get(phase, "#cac5df"))
         icon = QIcon(str(icon_path(phase)))
         root.setWindowIcon(icon)
         tray.setIcon(icon)
@@ -771,6 +841,7 @@ def graphical(listener):
         save()
 
     editor.textChanged.connect(edited)
+    editor.textChanged.connect(lambda: root.fit_timer.start())
 
     def revise(raw, final=False):
         root.fit_timer.start()
@@ -861,6 +932,7 @@ def graphical(listener):
         paused_at = None
         capture_problem = ""
         started = time.monotonic()
+        elapsed.setText("00:00")
         indicator("Recording")
         set_recording(True)
         directory, state = new_directory, new_state
@@ -869,7 +941,7 @@ def graphical(listener):
         stop=threading.Event()
         finished=threading.Event()
         working=True
-        status.setText("Recording")
+        status.setText(state.get("sync_error", ""))
         streaming, _, block = capture_options(state)
         args = (directory, stop, events, cfg["microphone"], pause)
         capture_thread = threading.Thread(target=capture, args=args + (block,) if streaming else args)
@@ -877,6 +949,15 @@ def graphical(listener):
         if streaming:
             reveal()
         transfer()
+
+    pending_segments = []
+
+    def apply_segments(parts):
+        for part in parts:
+            if part["index"] == state["applied"]:
+                state["applied"] += 1
+                revise(part["text"], final=True)
+        first_visible()
 
     def poll():
         nonlocal working, transfer_active, replace_session, paused_at, playback, capture_problem
@@ -911,8 +992,9 @@ def graphical(listener):
                 if not stop.is_set():
                     paused_at = time.monotonic()
                     indicator("Paused")
-                    status.setText("Paused")
-                    meter.hide()
+                    status.setText(state.get("sync_error") or "Capture paused")
+                    meter.peaks.clear()
+                    meter.update()
                     set_icon(pause_button, "Resume recording", "mic")
                     pause_button.setEnabled(True)
                     play_button.show()
@@ -925,31 +1007,38 @@ def graphical(listener):
                 playback = None
                 set_icon(play_button, "Play recording", "play")
                 if status.text() == "Playing":
-                    status.setText("Paused" if working else "Ready")
+                    status.setText(saved_status())
                 pause_button.setEnabled(True)
             elif kind=="stopped":
                 timing["captured"] = value
                 finished.set()
                 working = False
+                if pending_segments:
+                    apply_segments(pending_segments)
+                    pending_segments.clear()
                 timer.setInterval(ui_poll_ms)
-                elapsed.clear()
-                meter.setValue(0)
+                show_saved_duration()
                 set_recording(False)
                 indicator("Processing" if transfer_active else "Ready")
                 if transfer_active:
-                    status.setText(capture_problem or "Processing")
+                    status.setText(capture_problem or ("Saved locally · Syncing" if audio_available() else "Finishing recording"))
                 else:
+                    phase_label.setText("Sync failed" if state.get("sync_error") else "Stopped")
                     status.setText(capture_problem or state.get("sync_error") or "Audio saved locally")
-                    retry_button.show()
-            elif kind=="level":
-                meter.setValue(value)
+                    retry_button.setVisible(audio_available())
+            elif kind == "level":
+                continue  # Retain capture level events for existing consumers.
+            elif kind == "waveform":
+                if working and not pause.is_set() and not stop.is_set():
+                    meter.peaks.extend(value)
+                    meter.update()
             elif kind=="segments":
-                for part in value:
-                    if part["index"]==state["applied"]:
-                        state["applied"] += 1
-                        revise(part["text"], final=True)
-                first_visible()
+                if working and not state.get("streaming"):
+                    pending_segments[:] = value
+                else:
+                    apply_segments(value)
             elif kind=="retry":
+                set_icon(retry_button, "Retry sync", "retry")
                 transfer_active = False
                 if editor.isReadOnly():
                     editor.setReadOnly(False)
@@ -959,9 +1048,10 @@ def graphical(listener):
                 save()
                 if finished.is_set():
                     indicator("Ready")
+                    phase_label.setText("Sync failed")
                 status.setText(message if finished.is_set() else "Recording locally · " + message)
                 if finished.is_set():
-                    retry_button.show()
+                    retry_button.setVisible(audio_available())
             elif kind == "replacement":
                 state["text"] = " ".join(part["text"] for part in value if part["text"])
                 state["applied"] = len(value)
@@ -978,9 +1068,9 @@ def graphical(listener):
                     editor.setReadOnly(False)
                 state["ready"]=True
                 save()
-                status.setText(value)
+                status.setText("Delivered" if value == "Ready" else value)
                 set_icon(retry_button, "Reprocess saved audio", "retry")
-                retry_button.setVisible(audio_available())
+                retry_button.hide()
                 indicator("Ready")
                 if editor.toPlainText().strip():
                     copy_result()
@@ -1000,6 +1090,15 @@ def graphical(listener):
             else:
                 status.setText(value)
 
+    def saved_status():
+        if state.get("sync_error"):
+            return state["sync_error"]
+        if working:
+            return "Paused" if paused_at else "Recording"
+        if transfer_active:
+            return "Saved locally · Syncing"
+        return "Delivered" if state.get("ready") and state.get("text") else "Saved locally"
+
     def copy_result():
         text = editor.toPlainText()
         if not text:
@@ -1009,10 +1108,15 @@ def graphical(listener):
         if clipboard.text() != text:
             status.setText("Clipboard unavailable. Select and copy the text here.")
             return
-        status.setText("Copied to clipboard")
+        status.setText(saved_status() + " · Copied to clipboard")
 
     def audio_available():
         return directory is not None and any(p.stat().st_size >= 2 for p in directory.glob("*.raw"))
+
+    def show_saved_duration():
+        samples = sum(path.stat().st_size for path in directory.glob("*.raw"))
+        seconds = samples // 32000
+        elapsed.setText(f"{seconds // 60:02}:{seconds % 60:02}" if samples else "–:––")
 
     def pause_or_resume():
         nonlocal paused_at, started
@@ -1025,9 +1129,8 @@ def graphical(listener):
             started += time.monotonic() - paused_at
             paused_at = None
             play_button.hide()
-            meter.show()
             indicator("Recording")
-            status.setText("Recording")
+            status.setText(state.get("sync_error", ""))
             set_icon(pause_button, "Pause recording", "pause")
             pause.clear()
 
@@ -1045,7 +1148,26 @@ def graphical(listener):
         set_icon(play_button, "Stop playback", "stop")
         status.setText("Playing")
 
-    start_button = icon_button("Record", "mic")
+    def record_symbol(active):
+        pix = QPixmap(32, 32)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#311917" if active else "#152720"))
+        if active:
+            painter.drawRoundedRect(5, 5, 22, 22, 4, 4)
+        else:
+            painter.drawEllipse(5, 5, 22, 22)
+        painter.end()
+        return QIcon(pix)
+
+    start_button = QPushButton("Record")
+    start_button.setIconSize(QSize(16, 16))
+    start_button.setIcon(record_symbol(False))
+    start_button.setAccessibleName("Record")
+    start_button.setToolTip("Start local recording")
+    start_button.setFixedSize(100, 36)
     start_button.setObjectName("record")
     pause_button = icon_button("Pause recording", "pause")
     play_button = icon_button("Play recording", "play")
@@ -1062,48 +1184,38 @@ def graphical(listener):
     for button in (start_button, pause_button, play_button, retry_button):
         buttons.addWidget(button)
     buttons.addStretch(1)
-    buttons.addWidget(meter)
-    buttons.addWidget(elapsed)
     buttons.addWidget(copy_button)
     buttons.addWidget(recover_button)
     task_button = QPushButton()
     task_button.setObjectName("task")
-    task_button.setFixedSize(40, 30)
-    buttons.addWidget(task_button)
+    task_button.setFixedSize(66, 36)
+    header.addWidget(task_button)
     expanded = False
 
     def toggle_size():
         nonlocal expanded
         expanded = not expanded
         label = "Restore automatic size" if expanded else "Expand editor"
-        expand_button.setText("▣" if expanded else "□")
-        expand_button.setToolTip(label)
-        expand_button.setAccessibleName(label)
+        set_icon(expand_button, label, "restore" if expanded else "expand")
         fit_pill()
 
-    def window_control(symbol, name, action):
-        button = QPushButton(symbol)
-        button.setObjectName("windowControl")
-        button.setAccessibleName(name)
-        button.setToolTip(name)
-        button.setFixedSize(22, 24)
-        button.clicked.connect(action)
-        buttons.addWidget(button)
-        return button
-
-    window_control("−", "Minimize", root.showMinimized)
-    expand_button = window_control("□", "Expand editor", toggle_size)
-    window_control("×", "Close editor", root.close)
+    expand_button = icon_button("Expand editor", "expand")
+    expand_button.clicked.connect(toggle_size)
+    header.addWidget(expand_button)
     for button in (pause_button, play_button, retry_button):
         button.hide()
 
     def set_recording(active):
-        meter.setVisible(active)
+        meter.peaks.clear()
+        meter.update()
         pause_button.setVisible(active)
         pause_button.setEnabled(True)
         set_icon(pause_button, "Pause recording", "pause")
         play_button.setVisible(not active and audio_available())
-        set_icon(start_button, "Stop recording" if active else "Record", "stop" if active else "mic")
+        start_button.setText("Stop" if active else "Record")
+        start_button.setIcon(record_symbol(active))
+        start_button.setAccessibleName("Stop recording" if active else "Record")
+        start_button.setToolTip("Finish this recording" if active else "Start local recording")
         start_button.setProperty("recording", active)
         start_button.style().unpolish(start_button)
         start_button.style().polish(start_button)
@@ -1119,18 +1231,25 @@ def graphical(listener):
         atomic(pointer, directory.name.encode())
         with QSignalBlocker(editor):
             editor.setPlainText(state.get("text", ""))
+        root.fit_timer.start()
         stop.set()
         finished.set()
         play_button.setVisible(audio_available())
         set_icon(retry_button, "Reprocess saved audio" if state.get("ready") else "Retry sync", "retry")
-        retry_button.setVisible(audio_available())
-        status.setText(state.get("sync_error") or ("Local recording" if audio_available() else "Saved transcript"))
+        retry_button.setVisible(audio_available() and (not state.get("ready") or bool(state.get("sync_error"))))
+        show_saved_duration()
+        indicator("Ready")
+        phase_label.setText("Sync failed" if state.get("sync_error") else "Saved take")
+        status.setText(state.get("sync_error") or ("Completed · Saved transcript" if state.get("ready") else "Saved locally · Awaiting sync"))
 
     def list_recoverable():
         recovery.clear()
-        if working or transfer_active or playback is not None:
-            recovery.addAction("Finish the current operation to open history").setEnabled(False)
-            return
+        if not working and not transfer_active and playback is None and state.get("ready") and audio_available():
+            recovery.addAction("Reprocess saved audio", retry)
+            recovery.addSeparator()
+        can_open = not (working or transfer_active or playback is not None)
+        if not can_open:
+            recovery.addAction("Finish the current operation to open a take").setEnabled(False)
         count = 0
         page = recovery
         for created, saved, entry in recordings(HOME):
@@ -1146,13 +1265,15 @@ def graphical(listener):
             title = transcript[:42] + ("…" if len(transcript) > 42 else "")
             if not title:
                 title = "Saved audio" if entry.get("ready") else "Awaiting transcription"
-            details = [stamp]
+            details = [stamp, "Retry sync" if entry.get("sync_error") else
+                       "Delivered" if entry.get("ready") and (transcript or size) else "Local"]
             if size:
                 details.append(f"{duration // 60}:{duration % 60:02}")
             if entry.get("task") in TASK_LABELS:
                 details.append("ES" if entry["task"] == "transcribe" else "EN")
             label = title.replace("&", "&&") + "\n" + "  ·  ".join(details)
-            page.addAction(label, lambda checked=False, file=saved: recover(file))
+            action = page.addAction(label, lambda checked=False, file=saved: recover(file))
+            action.setEnabled(can_open)
         if not recovery.actions():
             recovery.addAction("No saved recordings").setEnabled(False)
     recovery.aboutToShow.connect(list_recoverable)
@@ -1175,7 +1296,8 @@ def graphical(listener):
             status.setText("Could not save live preview setting")
             return
         cfg["streaming"] = enabled
-        status.setText("Live preview on next recording" if enabled else "Standard mode next recording")
+        task_button.setToolTip("Next recording: " + TASK_LABELS[task] +
+                               (" · Live text on" if enabled else " · Live text off"))
 
     live_preview.toggled.connect(toggle_preview)
     task_menu.addSeparator()
@@ -1185,10 +1307,10 @@ def graphical(listener):
     def select_task(selected):
         nonlocal task
         task = selected
-        task_button.setText("ES" if task == "transcribe" else "EN")
+        task_button.setText(("ES" if task == "transcribe" else "EN") + "  ▾")
         description = "Next recording: " + TASK_LABELS[task]
         task_button.setAccessibleName(description)
-        task_button.setToolTip(description)
+        task_button.setToolTip(description + " · Task and live text settings")
         for key, action in task_actions.items():
             action.setChecked(key == selected)
 
@@ -1215,7 +1337,6 @@ def graphical(listener):
     else:
         timer.timeout.connect(lambda: read_shortcuts(listener, events))
     screen = app.screenAt(QCursor.pos()) or app.primaryScreen()
-    area = screen.availableGeometry()
     def fit_pill():
         if root.isMinimized():
             return
@@ -1224,19 +1345,17 @@ def graphical(listener):
         max_height = min(280, available.height())
         document = editor.document()
         length = document.characterCount() - 1
-        editor.setVisible(bool(length or working or expanded or directory))
-        status.setVisible(bool(status.text()))
+        copy_button.setVisible(bool(editor.toPlainText().strip()))
         margins = body.contentsMargins()
         padding = margins.left() + margins.right()
         width = max_width if expanded else min(max_width, max(
-            footer.minimumSizeHint().width() + padding, 264 + min(256, length * 2)))
+            footer.minimumSizeHint().width() + padding, 380 + min(140, length)))
         body.activate()
-        desired = margins.top() + margins.bottom() + footer.sizeHint().height()
+        desired = (margins.top() + margins.bottom() + 3 * body.spacing() +
+                   header.sizeHint().height() + meter.height() + footer.sizeHint().height() +
+                   max(editor.minimumHeight(), int(document.size().height()) + 15))
         if not status.isHidden():
-            desired += body.spacing() + min(status.maximumHeight(), max(status.fontMetrics().height(),
-                                           status.heightForWidth(max(1, width - padding))))
-        if not editor.isHidden():
-            desired += body.spacing() + max(editor.minimumHeight(), int(document.size().height()) + 8)
+            desired += body.spacing() + max(status.fontMetrics().height(), status.heightForWidth(max(1, width - padding)))
         height = max_height if expanded else min(max_height, desired)
         if root.width() != width or root.height() != height:
             root.resize(width, height)
@@ -1251,8 +1370,13 @@ def graphical(listener):
     root.fit_timer.timeout.connect(fit_pill)
     editor.document().documentLayout().documentSizeChanged.connect(lambda _: root.fit_timer.start())
     fit_pill()
-    root.move(area.center().x() - root.width() // 2, area.center().y() - root.height() // 2)
+    if not wayland:
+        area = screen.availableGeometry()
+        root.move(area.center().x() - root.width() // 2, area.center().y() - root.height() // 2)
     root.show()
+    sheet.setProperty("glass", root.windowHandle().format().alphaBufferSize() > 0)
+    sheet.style().unpolish(sheet)
+    sheet.style().polish(sheet)
     root.windowHandle().screenChanged.connect(lambda _: root.fit_timer.start())
     try:
         if os.environ.get("IV_DESKTOP_QT") == "6":
