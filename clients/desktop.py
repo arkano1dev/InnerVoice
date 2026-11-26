@@ -531,11 +531,11 @@ def run_graphical():
 def graphical(listener):
     if os.environ.get('IV_DESKTOP_QT') == '6':
         from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QEvent, QSize
-        from PySide6.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor, QPainterPath, QLinearGradient, QBrush
+        from PySide6.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
         from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QSystemTrayIcon, QMenu
     else:
         from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QEvent, QSize
-        from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor, QPainterPath, QLinearGradient, QBrush
+        from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
         from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QSystemTrayIcon, QMenu
 
     cfg = json.loads(CONFIG.read_bytes())
@@ -635,7 +635,7 @@ def graphical(listener):
     header.addStretch()
 
     class Waveform(QWidget):
-        """Filled envelope of the latest PCM peaks, newest on the right."""
+        """Monochrome bars show the latest PCM peaks, newest on the right."""
         def __init__(self):
             super().__init__()
             self.peaks = deque(maxlen=136)
@@ -645,29 +645,20 @@ def graphical(listener):
         def paintEvent(self, event):
             painter = QPainter(self)
             painter.setRenderHint(QPainter.Antialiasing)
-            mid = self.height() / 2
+            mid = self.height() // 2
             right = self.width() - 2
-            painter.setPen(QPen(QColor("#3c4847"), 1))
-            painter.drawLine(2, int(mid), right, int(mid))
-            peaks = list(self.peaks)[-max(1, right // 4):]
-            if peaks:
-                # A continuous silhouette with zero amplitude at silence.
-                steps = [min(mid - 1, (mid - 1) * peak ** .65) for peak in peaks]
-                x0 = right - 4 * (len(steps) - 1)
-                shape = QPainterPath()
-                shape.moveTo(x0, mid - steps[0])
-                for i in range(1, len(steps)):
-                    x = x0 + 4 * i
-                    shape.cubicTo(x - 2, mid - steps[i-1], x - 2, mid - steps[i], x, mid - steps[i])
-                shape.lineTo(right, mid + steps[-1])
-                for i in range(len(steps) - 2, -1, -1):
-                    x = x0 + 4 * i
-                    shape.cubicTo(x + 2, mid + steps[i+1], x + 2, mid + steps[i], x, mid + steps[i])
-                shape.closeSubpath()
-                ink = QLinearGradient(0, 0, right, 0)
-                ink.setColorAt(0, QColor("#547a70"))
-                ink.setColorAt(1, QColor("#a6dac7"))
-                painter.fillPath(shape, QBrush(ink))
+            painter.setPen(QPen(QColor(64, 64, 64), 1))
+            painter.drawLine(1, mid, right, mid)
+            for i, peak in enumerate(reversed(self.peaks)):
+                x = right - 4 * i
+                if x < 2:
+                    break
+                amplitude = min(1.0, peak ** .65)
+                height = round((mid - 1) * amplitude)
+                if height:
+                    gray = round(135 + 78 * amplitude)
+                    painter.setPen(QPen(QColor(gray, gray, gray), 1.6, Qt.SolidLine, Qt.RoundCap))
+                    painter.drawLine(x, mid - height, x, mid + height)
             painter.end()
 
     meter = Waveform()
