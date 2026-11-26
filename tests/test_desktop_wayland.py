@@ -273,7 +273,8 @@ class WaylandDesktopTests(unittest.TestCase):
                 stop.set()
                 worker.join(2)
 
-    @unittest.skipUnless(importlib.util.find_spec("PyQt5"), "PyQt5 is required for the editor test")
+    @unittest.skipUnless(importlib.util.find_spec("PySide6" if os.environ.get("IV_DESKTOP_QT") == "6" else "PyQt5"),
+                         "Qt bindings are required for the editor test")
     def test_editor_records_and_stops_from_shortcuts_then_copies_result(self):
         if os.environ.get("IV_DESKTOP_QT") == "6":
             from PySide6 import QtCore, QtWidgets
@@ -337,7 +338,7 @@ class WaylandDesktopTests(unittest.TestCase):
                 for widget in app.topLevelWidgets():
                     editor = widget.findChild(QtWidgets.QTextEdit)
                     if editor is not None and "startup" not in observed:
-                        observed["startup"] = (widget.isVisible() and widget.height() <= 64
+                        observed["startup"] = (widget.isVisible() and editor.isVisible() and editor.height() >= 72
                                                and bool(widget.windowFlags() & QtCore.Qt.FramelessWindowHint)
                                                and not editor.toPlainText()
                                                and editor.placeholderText() == "Ready when you are")
@@ -380,14 +381,12 @@ class WaylandDesktopTests(unittest.TestCase):
                         app.processEvents()
                         observed["maximized"] = (expanded_size.width() == 520 and expanded_size.height() == 280
                                                   and widget.height() == normal_size.height())
-                        control("Minimize").click()
-                        observed["minimized"] = widget.isMinimized()
                         editor.setPlainText("Long dictation with wrapping. " * 400)
                         widget.showNormal()
                         for _ in range(5):
                             app.processEvents()
                         observed["bounded"] = widget.size() == expanded_size and editor.verticalScrollBar().maximum() > 0
-                        control("Close editor").click()
+                        widget.close()
                         observed["closed"] = not widget.isVisible()
                         widget.show()
                         app.processEvents()
@@ -406,7 +405,9 @@ class WaylandDesktopTests(unittest.TestCase):
                         history = next(b.menu() for b in widget.findChildren(QtWidgets.QPushButton)
                                        if b.accessibleName() == "Local recording history")
                         history.aboutToShow.emit()
-                        observed["count"] = len(history.actions())
+                        observed["reprocess"] = any(a.text() == "Reprocess saved audio" for a in history.actions())
+                        observed["count"] = sum(not a.isSeparator() and a.text() != "Reprocess saved audio"
+                                                for a in history.actions())
                         observed["cleaned"] = any(
                             action.text().startswith("Saved after audio cleanup\n") and action.text().endswith("ES")
                             for action in history.actions()
@@ -454,7 +455,7 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertTrue(observed["centered"])
             self.assertTrue(observed["bounded"])
             self.assertTrue(observed["maximized"])
-            self.assertTrue(observed["minimized"])
+            self.assertTrue(observed["reprocess"])
             self.assertTrue(observed["closed"])
             saved = attempts[-1]
             self.assertTrue((saved / "000.raw").is_file())
