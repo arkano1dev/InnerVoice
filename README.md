@@ -10,7 +10,36 @@
 | Get a transcript or translation in Telegram | The optional, single-user InnerVoice bot sends the result back in your Telegram chat. See the [bot guide](docs/private-gateway.md#server-audio-and-telegram) and [current bot source](bot/bot.py). |
 | Dictate into a desktop app | The optional Ubuntu client lets you start and stop with a shortcut, edit text as it arrives, and copy the result. The Docker client uses Wayland. Run the client [in Docker](docs/private-gateway.md#run-the-desktop-client-in-docker) or [directly on Ubuntu](docs/private-gateway.md#run-directly-on-ubuntu). |
 
-The **Voice Gateway** accepts audio over private HTTPS, uses a shared Whisper worker and holds server-side audio in RAM while processing. An interrupted container can lose unfinished audio. The standalone bot uses a dedicated bearer and a local Unix socket. The desktop client saves audio on the workstation while you record. Pause, listen, and resume the same take, or reopen one of the ten most recent recordings from the clock.
+## Architecture
+
+The private deployment runs inference on one server. The Ubuntu recorder and agent adapter reach the Voice Gateway over private HTTPS. The optional standalone bot runs alongside the Gateway and connects out to Telegram to receive notes and send replies.
+
+```mermaid
+flowchart TD
+    desktop["Ubuntu recorder"]
+    agent["Agent STT adapter"]
+    telegram["Telegram Bot API"]
+    subgraph server["Private server"]
+        bot["Standalone bot"]
+        gateway["Voice Gateway"]
+        worker["Whisper worker"]
+        state[("SQLite state")]
+        bot -->|Unix socket| gateway
+        gateway -->|Internal inference requests| worker
+        gateway -->|Jobs and results| state
+    end
+    desktop -->|HTTPS recording sessions| gateway
+    agent -->|HTTPS file uploads| gateway
+    telegram <-->|HTTPS| bot
+```
+
+**Desktop dictation.** The recorder captures mono 16 kHz audio locally. With live text enabled, it uploads numbered two-second WAV fragments and polls the session for text. Each preview replaces the unfinished tail in the editor. The Gateway assembles the fragments into 30-second windows for confirmed text. When you stop, the client finalizes the session and the worker processes any remaining audio. The editor preserves your corrections and copies the finished text to the clipboard. See [hotkey streaming and latency measurements](docs/hotkey-streaming.md).
+
+**Whole-file jobs and Telegram.** The agent adapter uploads a file to `POST /v1/jobs` with an idempotency key so it can safely retry the same submission. The Gateway returns a job ID, and the adapter polls for the final English text. The standalone bot has its own bearer credential and sends audio segments through the Gateway’s Unix socket. It returns a transcript, translation or both to the authorized Telegram chat. Audio sent this way passes through Telegram before reaching the private server.
+
+**Shared inference.** The Gateway schedules work for one active engine, OpenAI Whisper (PyTorch) or faster-whisper (CTranslate2), using local model weights. Interactive dictation takes priority over background bot work. A request already running on the worker can still delay the next result. Only the Gateway’s private HTTPS port is published. See [worker configuration and recovery](docs/private-gateway.md#cli-reference).
+
+**Where data lives.** Server-side audio scratch files use bounded RAM-backed filesystems. An interrupted container can lose unfinished audio. The Gateway keeps job metadata and transcripts in SQLite under the configured retention policy. The desktop keeps its own recording history for playback and retry, including after a successful transcription. See [server storage and Telegram](docs/private-gateway.md#server-audio-and-telegram) and [workstation storage](docs/private-gateway.md#desktop-role).
 
 ## Get started
 
