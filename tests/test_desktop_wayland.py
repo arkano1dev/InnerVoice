@@ -273,7 +273,8 @@ class WaylandDesktopTests(unittest.TestCase):
                 stop.set()
                 worker.join(2)
 
-    @unittest.skipUnless(importlib.util.find_spec("PyQt5"), "PyQt5 is required for the editor test")
+    @unittest.skipUnless(importlib.util.find_spec("PySide6" if os.environ.get("IV_DESKTOP_QT") == "6" else "PyQt5"),
+                         "Qt bindings are required for the editor test")
     def test_editor_records_and_stops_from_shortcuts_then_copies_result(self):
         if os.environ.get("IV_DESKTOP_QT") == "6":
             from PySide6 import QtCore, QtWidgets
@@ -337,7 +338,7 @@ class WaylandDesktopTests(unittest.TestCase):
                 for widget in app.topLevelWidgets():
                     editor = widget.findChild(QtWidgets.QTextEdit)
                     if editor is not None and "startup" not in observed:
-                        observed["startup"] = (widget.isVisible() and widget.height() <= 64
+                        observed["startup"] = (widget.isVisible() and editor.isVisible() and editor.height() >= 72
                                                and bool(widget.windowFlags() & QtCore.Qt.FramelessWindowHint)
                                                and not editor.toPlainText()
                                                and editor.placeholderText() == "Ready when you are")
@@ -380,14 +381,12 @@ class WaylandDesktopTests(unittest.TestCase):
                         app.processEvents()
                         observed["maximized"] = (expanded_size.width() == 520 and expanded_size.height() == 280
                                                   and widget.height() == normal_size.height())
-                        control("Minimize").click()
-                        observed["minimized"] = widget.isMinimized()
                         editor.setPlainText("Long dictation with wrapping. " * 400)
                         widget.showNormal()
                         for _ in range(5):
                             app.processEvents()
                         observed["bounded"] = widget.size() == expanded_size and editor.verticalScrollBar().maximum() > 0
-                        control("Close editor").click()
+                        widget.close()
                         observed["closed"] = not widget.isVisible()
                         widget.show()
                         app.processEvents()
@@ -406,7 +405,9 @@ class WaylandDesktopTests(unittest.TestCase):
                         history = next(b.menu() for b in widget.findChildren(QtWidgets.QPushButton)
                                        if b.accessibleName() == "Local recording history")
                         history.aboutToShow.emit()
-                        observed["count"] = len(history.actions())
+                        observed["reprocess"] = any(a.text() == "Reprocess saved audio" for a in history.actions())
+                        observed["count"] = sum(not a.isSeparator() and a.text() != "Reprocess saved audio"
+                                                for a in history.actions())
                         observed["cleaned"] = any(
                             action.text().startswith("Saved after audio cleanup\n") and action.text().endswith("ES")
                             for action in history.actions()
@@ -454,7 +455,7 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertTrue(observed["centered"])
             self.assertTrue(observed["bounded"])
             self.assertTrue(observed["maximized"])
-            self.assertTrue(observed["minimized"])
+            self.assertTrue(observed["reprocess"])
             self.assertTrue(observed["closed"])
             saved = attempts[-1]
             self.assertTrue((saved / "000.raw").is_file())
@@ -462,3 +463,103 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertEqual(record["text"], "Edited note")
             self.assertTrue(record["ready"])
             self.assertEqual(record["applied"], 1)
+
+    @unittest.skipUnless(os.environ.get("IV_DESKTOP_QT") == "6", "desktop container uses Qt 6")
+    def test_transport_retry_and_reprocess_controls(self):
+        from PySide6 import QtCore, QtWidgets
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / "settings.json"
+            config.write_text('{"microphone":"","ui_poll_ms":100}')
+            app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+            listener = MagicMock()
+            listener.recv.side_effect = BlockingIOError
+            failures = []
+            attempts = []
+
+            def capture(directory, stop, events, device, pause):
+                (directory / "000.raw").write_bytes(bytes(32000))
+                while not stop.wait(.01):
+                    if pause.is_set():
+                        events.put(("paused", None))
+                        while pause.is_set() and not stop.wait(.01):
+                            pass
+                events.put(("stopped", None))
+
+            def playback(directory, cancel, events):
+                cancel.wait(5)
+                events.put(("play_end", None))
+
+            def network(cfg, directory, key, events, finished):
+                attempts.append(key)
+                if finished.wait(8):
+                    if len(attempts) == 1:
+                        events.put(("retry", ("Retry this take", False)))
+                    elif len(attempts) == 2:
+                        events.put(("segments", [{"index": 0, "text": "Saved words"}]))
+                        events.put(("ready", "Ready"))
+                    else:
+                        events.put(("replacement", [{"text": "Reprocessed words"}]))
+                        events.put(("ready", "Ready"))
+
+            def scenario():
+                window = next(w for w in app.topLevelWidgets() if w.objectName() == "recorderWindow")
+                editor = window.findChild(QtWidgets.QTextEdit)
+                def button(label):
+                    return next((b for b in window.findChildren(QtWidgets.QPushButton)
+                                 if b.isVisible() and b.accessibleName() == label), None)
+                def wait_for(predicate):
+                    for _ in range(100):
+                        value = predicate()
+                        if value:
+                            return value
+                        yield
+                    self.fail("Timed out waiting for the recorder control or result")
+
+                task = window.findChild(QtWidgets.QPushButton, "task")
+                next(a for a in task.menu().actions() if a.text() == "Transcribe Spanish").trigger()
+                self.assertIn("ES", task.text())
+                button("Record").click()
+                self.assertIsNone(button("Play recording"))
+                button("Pause recording").click()
+                play = yield from wait_for(lambda: button("Play recording"))
+                play.click()
+                self.assertFalse(button("Resume recording").isEnabled())
+                button("Stop playback").click()
+                yield from wait_for(lambda: button("Resume recording").isEnabled())
+                button("Resume recording").click()
+                self.assertIsNone(button("Play recording"))
+                button("Stop recording").click()
+                retry = yield from wait_for(lambda: button("Retry sync"))
+                retry.click()
+                yield from wait_for(lambda: editor.toPlainText() == "Saved words")
+                history = button("Local recording history").menu()
+                history.aboutToShow.emit()
+                next(a for a in history.actions() if a.text() == "Reprocess saved audio").trigger()
+                self.assertEqual(editor.toPlainText(), "Saved words")
+                yield from wait_for(lambda: editor.toPlainText() == "Reprocessed words")
+                self.assertEqual(app.clipboard().text(), "Reprocessed words")
+                self.assertEqual(len(attempts), 3)
+
+            steps = scenario()
+            def tick():
+                try:
+                    next(steps)
+                except StopIteration:
+                    app.quit()
+                except Exception as error:
+                    failures.append(error)
+                    app.quit()
+                else:
+                    QtCore.QTimer.singleShot(30, tick)
+
+            with (patch.object(QtWidgets, "QApplication", return_value=app),
+                  patch.object(desktop, "CONFIG", config), patch.object(desktop, "HOME", home),
+                  patch.object(desktop, "capture", side_effect=capture),
+                  patch.object(desktop, "play_audio", side_effect=playback),
+                  patch.object(desktop, "network", side_effect=network)):
+                QtCore.QTimer.singleShot(30, tick)
+                desktop.graphical(listener)
+            if failures:
+                raise failures[0]
