@@ -86,7 +86,8 @@ finally:
     ui.send_signal(signal.SIGTERM)
     assert ui.wait(timeout=10) == 0
 
-subprocess.run([os.sys.executable, "-m", "unittest",
-                "test_desktop_wayland.WaylandDesktopTests.test_editor_records_and_stops_from_shortcuts_then_copies_result"],
-               check=True, cwd="/app")
+for case in ("test_editor_records_and_stops_from_shortcuts_then_copies_result",
+             "test_transport_retry_and_reprocess_controls"):
+    subprocess.run([os.sys.executable, "-m", "unittest", f"test_desktop_wayland.WaylandDesktopTests.{case}"],
+                   check=True, cwd="/app", env=dict(os.environ, QT_QPA_PLATFORM="offscreen"))
 PY
