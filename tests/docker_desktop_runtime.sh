@@ -32,6 +32,7 @@ timeout 50 docker run --rm -i --network none --read-only --cap-drop ALL --securi
     -e XDG_RUNTIME_DIR=/run/runtime -e WAYLAND_DISPLAY=/run/iv/wayland -e XDG_SESSION_TYPE=wayland \
     -e QT_QPA_PLATFORM=wayland -e PULSE_SERVER=unix:/run/iv/pulse -e HOME=/home/recorder \
     -v "$XDG_RUNTIME_DIR/iv-wayland:/run/iv/wayland:ro" -v "$temp/pulse.sock:/run/iv/pulse:ro" \
+    -v "$PWD/tests/test_desktop_wayland.py:/app/test_desktop_wayland.py:ro" \
     -v "$temp/home:/home/recorder" --entrypoint /opt/innervoice/bin/python "$image" - <<'PY'
 import os
 import queue
@@ -63,8 +64,12 @@ try:
     recorder = threading.Thread(target=desktop.capture, args=(directory, stop, events, "", threading.Event()))
     recorder.start()
     try:
-        event, value = events.get(timeout=12)
-        assert event == "level", (event, value)
+        while True:
+            event, value = events.get(timeout=12)
+            assert event != "capture_error", value
+            if event == "waveform":
+                assert value and all(0 <= peak <= 1 for peak in value)
+                break
     finally:
         stop.set()
         recorder.join(5)
@@ -80,4 +85,8 @@ try:
 finally:
     ui.send_signal(signal.SIGTERM)
     assert ui.wait(timeout=10) == 0
+
+subprocess.run([os.sys.executable, "-m", "unittest",
+                "test_desktop_wayland.WaylandDesktopTests.test_editor_records_and_stops_from_shortcuts_then_copies_result"],
+               check=True, cwd="/app")
 PY
