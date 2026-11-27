@@ -91,6 +91,19 @@ class StreamingTests(unittest.TestCase):
             db.execute("UPDATE jobs SET state='processing' WHERE id=?", (row["id"],))
         jobs.process(row)
 
+    def test_saved_93_second_upload_only_decodes_confirmed_windows(self):
+        path = self.create("saved", json={"streaming": True, "defer_until_closed": True})
+        for i in range(47):
+            size = sessions.STREAM_BLOCK if i < 46 else 40000
+            self.assertEqual(self.upload(path, i, b"\x01\x00" * (size // 2)).status_code, 201)
+            with jobs.database() as db:
+                self.assertEqual(jobs.runnable(db), [])
+        self.call("POST", path + "/finalize", json={"last_index": 46})
+        for _ in range(4):
+            self.process(preview=False)
+        self.assertEqual([len(pcm) / 32000 for pcm, _ in self.worker_calls], [30, 30, 30, 3.25])
+        self.assertEqual(self.progress(path)["state"], "succeeded")
+
     def test_preview_and_final_match_legacy_worker_input_in_both_tasks(self):
         chunks = [bytes((i, 0)) * (sessions.STREAM_BLOCK // 2) for i in (1, 2, 3)]
         tail = b"\x04\x00" * 23999
@@ -257,6 +270,27 @@ class StreamingTests(unittest.TestCase):
         self.assertNotIn("segments", kinds)
         self.assertEqual(kinds[-3:], ["replacement", "delivered", "ready"])
 
+    def test_saved_upload_observes_gpu_fault_between_poll_and_upload(self):
+        directory = jobs.ROOT / "saved"
+        directory.mkdir()
+        (directory / "editor.json").write_text("{}")
+        (directory / "000.raw").write_bytes(b"\x01\x00")
+        finished = threading.Event()
+        finished.set()
+        events = queue.Queue()
+        closed = requests.Response()
+        closed.status_code = 409
+        closed._content = b'{"error":{"code":"session_closed"}}'
+        progress = dict(received=[], segments=[], closed=False, state="queued")
+        with patch.object(desktop, "Client") as client, patch.object(desktop, "metric"):
+            client.return_value.call.side_effect = [
+                {"session_id": "take"}, progress, requests.HTTPError(response=closed),
+                dict(progress, state="failed", error={"code": "worker_protection_active"}),
+            ]
+            desktop.network({}, directory, "take", events, finished)
+        self.assertEqual(list(events.queue)[-1], ("retry", (desktop.GPU_PAUSED, True)))
+        self.assertEqual((directory / "000.raw").read_bytes(), b"\x01\x00")
+
     def test_read_timeout_latches_without_another_inference(self):
         path = self.create("hung", json={"streaming": True})
         self.upload(path, 0, b"\x01\x00" * (sessions.STREAM_BLOCK // 2))
@@ -264,6 +298,8 @@ class StreamingTests(unittest.TestCase):
             with self.assertRaises(jobs.legacy.WorkerFault):
                 self.process(preview=True)
         self.assertEqual(post.call_args.kwargs["timeout"], (2, jobs.legacy.INFERENCE_TIMEOUT))
+        self.assertIn("worker_timeout source=desktop pass=preview index=0 audio_seconds=2.00",
+                      jobs.legacy.fault_marker().read_text())
         self.assertTrue(jobs.legacy.fault_marker().is_file())
 
     def test_kernel_dump_blocks_worker_before_probe_or_inference(self):

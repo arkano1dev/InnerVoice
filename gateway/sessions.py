@@ -29,6 +29,8 @@ def schema(db):
         job TEXT, idx INTEGER, received REAL NOT NULL, PRIMARY KEY(job, idx)
     );
     """)
+    if "defer_until_closed" not in {r[1] for r in db.execute("PRAGMA table_info(session_options)")}:
+        db.execute("ALTER TABLE session_options ADD COLUMN defer_until_closed INTEGER NOT NULL DEFAULT 0")
 
 
 def lookup(db,ident):
@@ -50,7 +52,8 @@ def routes(api):
             return jobs.failure("invalid_session_options",400)
         task = options.get("task", "translate")
         streaming = options.get("streaming", False)
-        if task not in TASKS or type(streaming) is not bool:
+        defer = options.get("defer_until_closed", False)
+        if task not in TASKS or type(streaming) is not bool or type(defer) is not bool:
             return jobs.failure("invalid_session_options",400)
         with jobs.admission,jobs.database() as db:
             old=db.execute("SELECT id,state,digest FROM jobs WHERE replay=? AND owner=?",(key,owner)).fetchone()
@@ -62,6 +65,8 @@ def routes(api):
                 saved = db.execute("SELECT task,streaming FROM session_options WHERE id=?", (old["id"],)).fetchone()
                 if (tuple(saved) if saved else ("translate", 0)) != (task, streaming):
                     return jobs.failure("idempotency_conflict",409)
+                if defer:
+                    db.execute("UPDATE session_options SET defer_until_closed=1 WHERE id=?", (old["id"],))
                 return {"session_id":old["id"]},200
             if jobs.legacy.fault_marker().exists():
                 return {"error":{"code":"worker_protection_active","retryable":False}},503
@@ -74,8 +79,8 @@ def routes(api):
             db.execute("INSERT INTO jobs(id,owner,replay,digest,profile,state,total,created) VALUES(?,?,?,'capture',?,'queued',0,?)",
                        (ident,owner,key,jobs.PROFILE,time.time()))
             db.execute("INSERT INTO sessions(id) VALUES(?)",(ident,))
-            db.execute("INSERT INTO session_options(id,task,streaming) VALUES(?,?,?)",
-                       (ident,task,streaming))
+            db.execute("INSERT INTO session_options(id,task,streaming,defer_until_closed) VALUES(?,?,?,?)",
+                       (ident,task,streaming,defer))
             return {"session_id":ident},201
 
     @api.get("/v1/sessions/<ident>")

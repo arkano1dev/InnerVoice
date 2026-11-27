@@ -27,13 +27,12 @@ class WaylandDesktopTests(unittest.TestCase):
                 self.assertEqual(desktop.resize_region(x, y, 140, 64), (horizontal, vertical))
         self.assertEqual(desktop.resize_region(8, 8, 140, 64), ("", ""))
 
-    def test_topmost_preference_defaults(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "always-on-top"
-            self.assertFalse(desktop.pin_requested(path))
-            for value, expected in ((b"1", True), (b"0", False), (b"\xff", False)):
-                path.write_bytes(value)
-                self.assertEqual(desktop.pin_requested(path), expected)
+    def test_proportional_drag_from_edges_and_corners(self):
+        for dx, dy, x, y in ((140,0,"right",""),(-140,0,"left",""),
+                             (0,216,"","bottom"),(0,-216,"","top"),(-140,-216,"left","top")):
+            self.assertEqual(desktop.drag_size(380,64,dx,dy,x,y,1920,1080), (520,280))
+        self.assertEqual(desktop.drag_size(520,280,520,0,"right","",1920,1080), (1040,560))
+        self.assertEqual(desktop.drag_size(520,280,900,0,"right","",1920,420), (780,420))
 
     def test_user_corrections_survive_preview_and_final_revisions(self):
         raw = "Meet Ana at noon"
@@ -420,11 +419,8 @@ esac
                         actions.aboutToShow.emit()
                         observed["overflow"] = {"Copy", "Play recording", "Local recording history",
                                                 "Task and live text"} <= {a.text() for a in actions.actions()}
-                        pin = control("Always on top")
-                        pin.click()
-                        observed["pin"] = ((home / "always-on-top").read_bytes() == b"1"
-                                           and bool(widget.windowFlags() & QtCore.Qt.WindowStaysOnTopHint)
-                                           and widget.size() == normal_size)
+                        observed["pin_removed"] = all(b.accessibleName() != "Always on top"
+                                                      for b in widget.findChildren(QtWidgets.QPushButton))
 
                         control("Expand editor").click()
                         app.processEvents()
@@ -511,7 +507,7 @@ esac
             self.assertTrue(observed.get("retried"))
             self.assertEqual(len(set(attempts)), 2)
             self.assertEqual(observed.get("auto"), "Test note")
-            for condition in ("startup", "ordinary", "after_auto", "after_copy", "compact_delivery", "manual", "pin",
+            for condition in ("startup", "ordinary", "after_auto", "after_copy", "compact_delivery", "manual", "pin_removed",
                               "hidden_metric", "passive", "overflow", "width_only", "restored"):
                 self.assertTrue(observed.get(condition), condition)
             self.assertEqual(observed.get("clipboard"), "Edited note")
@@ -592,9 +588,8 @@ esac
                         yield
                     self.fail("Timed out waiting for the recorder control or result")
 
-                pin = button("Always on top")
-                self.assertTrue(pin.isChecked())
-                self.assertTrue(window.windowFlags() & QtCore.Qt.WindowStaysOnTopHint)
+                self.assertIsNone(button("Always on top"))
+                self.assertFalse(window.windowFlags() & QtCore.Qt.WindowStaysOnTopHint)
                 sheet = window.findChild(QtWidgets.QWidget, "surface")
                 handle = MagicMock()
                 with patch.object(window, "windowHandle", return_value=handle):
@@ -607,20 +602,13 @@ esac
                             if horizontal is None and vertical is None:
                                 handle.startSystemMove.assert_called_once_with()
                             else:
-                                edges = horizontal or vertical
-                                if horizontal and vertical:
-                                    edges = horizontal | vertical
-                                handle.startSystemResize.assert_called_once_with(edges)
+                                handle.startSystemMove.assert_not_called()
                             handle.reset_mock()
                 button("Expand editor").click()
                 task = window.findChild(QtWidgets.QPushButton, "task")
                 next(a for a in task.menu().actions() if a.text() == "Transcribe Spanish").trigger()
                 self.assertIn("ES", task.text())
                 button("Record").click()
-                size = window.size()
-                pin.click()
-                self.assertEqual(window.size(), size)
-                self.assertEqual((home / "always-on-top").read_bytes(), b"0")
                 self.assertIsNone(button("Play recording"))
                 button("Pause recording").click()
                 play = yield from wait_for(lambda: button("Play recording"))

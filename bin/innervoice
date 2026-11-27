@@ -749,14 +749,33 @@ def operate(args):
                 verify_private_memory(active, ["gateway", "whisper"] + (["bot"] if active["deployment"]["telegram"] else []))
             # A read timeout abandons the HTTP response, not the native operation.
             # Verify the original worker slot is free before opening the gate.
-            check = ("import requests,legacy; assert hasattr(legacy, 'worker_probe'); assert not legacy.gpu_dump_present(); "
-                     "s=requests.Session(); s.trust_env=False; "
-                     "r=s.get('http://whisper:9000/can-transcribe',timeout=(2,7)); "
-                     "r.raise_for_status(); assert r.json().get('can_transcribe') is True")
+            check = """import sys
+import requests
+import legacy
+if not hasattr(legacy, 'worker_probe'):
+    sys.exit(30)
+if legacy.gpu_dump_present():
+    sys.exit(31)
+client = requests.Session()
+client.trust_env = False
+response = client.get('http://whisper:9000/can-transcribe', timeout=(2,7))
+if response.status_code == 503:
+    sys.exit(32)
+response.raise_for_status()
+if response.json().get('can_transcribe') is not True:
+    sys.exit(32)
+"""
             try:
                 compose(active,"exec","-T","gateway","python","-c",check,capture=True,timeout=12)
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-                raise ValueError("Worker is busy or unavailable, or a GPU coredump is present. Dispatch remains paused.") from error
+            except subprocess.CalledProcessError as error:
+                reason = {
+                    30: "Gateway readiness support is missing. Run update-gateway.",
+                    31: "A GPU coredump is present. Inspect the host kernel log.",
+                    32: "Worker is busy or VRAM is unavailable. Wait for readiness before retrying.",
+                }.get(error.returncode, "Worker readiness check failed. Inspect gateway and whisper logs.")
+                raise ValueError(f"{reason} Dispatch remains paused.") from error
+            except subprocess.TimeoutExpired as error:
+                raise ValueError("Worker readiness check timed out. Dispatch remains paused.") from error
             if active["deployment"]["telegram"]:
                 pending_hold.touch()
             latch.unlink(missing_ok=True)
@@ -767,6 +786,10 @@ def operate(args):
     if args.cmd=="status":
         print("GPU dispatch:", "paused after worker failure" if
               (Path(active["deployment"]["data"])/"worker-fault").exists() else "enabled")
+        if latch.exists():
+            detail = latch.read_text().strip()
+            if detail:
+                print("Pause reason:", detail)
         print("Telegram pending queue:", "held" if pending_hold.exists() else "automatic")
         compose(active,"ps")
         print("Saved engine:",cfg["deployment"]["engine"],"active engine:",active["deployment"]["engine"] if ACTIVE.exists() else "unavailable",

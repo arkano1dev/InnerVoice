@@ -372,7 +372,10 @@ def process(row):
         segment=""
     else:
         lane_start = time.monotonic()
-        with legacy.inference_lane("jobs"), legacy.guarded_dispatch():
+        kind = "preview" if preview else "confirmed"
+        source = "desktop" if capture else "job"
+        context = f"source={source} pass={kind} index={index} audio_seconds={len(samples)/32000:.2f}"
+        with legacy.inference_lane("jobs"), legacy.guarded_dispatch(context):
             lane_wait_ms = telemetry.ms(lane_start)
             if preview:
                 with database() as db:
@@ -506,6 +509,7 @@ def runnable(db):
             FROM jobs j LEFT JOIN sessions s ON s.id=j.id
             LEFT JOIN session_options o ON o.id=j.id
             WHERE j.state='queued' AND j.done<j.total AND j.profile=? AND j.ready<=?
+              AND (NOT coalesce(o.defer_until_closed,0) OR s.closed)
         )
         SELECT * FROM candidates
         WHERE NOT coalesce(streaming,0) OR closed OR total-done>=?

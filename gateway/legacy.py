@@ -57,7 +57,7 @@ def require_dispatch():
 
 
 @contextmanager
-def guarded_dispatch():
+def guarded_dispatch(context=""):
     # The caller owns the shared inference lane. Set the latch before releasing it.
     marker = fault_marker()
     if marker.exists():
@@ -72,7 +72,9 @@ def guarded_dispatch():
         reason = "worker_timeout" if isinstance(error, requests.Timeout) else "worker_fault"
         if isinstance(error, WorkerFault):
             reason = str(error)
-        print(f"InnerVoice: {reason}; GPU dispatch paused until gpu-resume", flush=True)
+        detail = f"{reason} {context}".strip()
+        marker.write_text(detail + "\n")
+        print(f"InnerVoice: {detail}; GPU dispatch paused until gpu-resume", flush=True)
         raise WorkerFault("worker_protection_active") from error
 
 

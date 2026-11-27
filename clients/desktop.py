@@ -337,7 +337,7 @@ class TransferEvents:
         self.events.put(("transfer_event", (self, event)))
 
 
-GPU_PAUSED = "GPU protection active. Audio stays on this desktop. Retry after server recovery."
+GPU_PAUSED = "GPU paused. Audio stays on this desktop. On the server, run ./bin/innervoice status and ./bin/innervoice gpu-resume. Retry once dispatch is enabled."
 
 
 def network(cfg, directory, key, events, finished):
@@ -365,6 +365,7 @@ def network(cfg, directory, key, events, finished):
     needs_sync = True
     next_index = 0
     final_files = None
+    checked_closed = False
     while True:
         try:
             done = finished.is_set()
@@ -393,6 +394,8 @@ def network(cfg, directory, key, events, finished):
                         events.put(("retry", ("Update the Gateway to sync this saved recording.", False)))
                         return
                     options = {"json": {"streaming": streaming, "task": task}}
+                    if streaming and done:
+                        options["json"]["defer_until_closed"] = True
                 session = client.call("POST", "/v1/sessions", headers={"Idempotency-Key": key}, **options)
                 path = "/v1/sessions/" + session["session_id"]
                 events.put(("session", session["session_id"]))
@@ -458,11 +461,14 @@ def network(cfg, directory, key, events, finished):
         except requests.HTTPError as error:
             status = error.response.status_code
             needs_sync = True
-            if status == 503:
+            if status in (409, 503):
                 try:
                     code = error.response.json()["error"]["code"]
                 except (KeyError, TypeError, ValueError):
                     code = None
+                if code == "session_closed" and path and not checked_closed:
+                    checked_closed = True
+                    continue  # Fetch the terminal state if dispatch failed mid-upload.
                 if code == "worker_protection_active":
                     events.put(("retry", (GPU_PAUSED, False)))
                     return
@@ -535,11 +541,24 @@ def resize_region(x, y, width, height):
     return horizontal, vertical
 
 
-def pin_requested(path):
-    try:
-        return path.read_bytes().strip() == b"1"
-    except OSError:
-        return False
+def drag_size(width, height, dx, dy, horizontal, vertical, max_width, max_height):
+    # Interpolate from the pill to the default editor, then scale the editor uniformly.
+    def width_at(h):
+        if h < 280:
+            return 380 + (h - 64) * 140 / 216
+        return h * 520 / 280
+
+    def height_at(w):
+        if w < 520:
+            return 64 + (w - 380) * 216 / 140
+        return w * 280 / 520
+
+    across = width + (dx if horizontal == "right" else -dx)
+    down = width_at(height + (dy if vertical == "bottom" else -dy))
+    if vertical and (not horizontal or abs(down - width) > abs(across - width)):
+        across = down
+    w = max(380, min(across, max_width, width_at(max_height)))
+    return round(w), round(height_at(w))
 
 
 def graphical(listener):
@@ -575,10 +594,7 @@ def graphical(listener):
             super().resizeEvent(event)
             refresh_layout()
 
-    pin_path = HOME / "always-on-top"
-    pinned = pin_requested(pin_path)
     root = RecorderWindow(None, Qt.Window | Qt.FramelessWindowHint)
-    root.setWindowFlag(Qt.WindowStaysOnTopHint, pinned)
     root.setAttribute(Qt.WA_ShowWithoutActivating)
     root.setObjectName("recorderWindow")
     root.setAttribute(Qt.WA_TranslucentBackground)
@@ -615,11 +631,35 @@ def graphical(listener):
     outer = QVBoxLayout(root)
     outer.setContentsMargins(0, 0, 0, 0)
     class RecorderSurface(QWidget):
+        drag = None
+
+        def pointer(self, event):
+            return event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
+
+        def mouseReleaseEvent(self, event):
+            if event.button() == Qt.LeftButton:
+                self.drag = None
+            super().mouseReleaseEvent(event)
+
         def region(self, event):
             point = event.position().toPoint() if hasattr(event, "position") else event.pos()
             return resize_region(point.x(), point.y(), self.width(), self.height())
 
         def mouseMoveEvent(self, event):
+            if self.drag is not None:
+                origin, geometry, horizontal, vertical = self.drag
+                delta = self.pointer(event) - origin
+                area = root.screen().availableGeometry()
+                w, h = drag_size(geometry.width(), geometry.height(), delta.x(), delta.y(),
+                                 horizontal, vertical, area.width(), area.height())
+                if wayland:
+                    root.resize(w, h)
+                else:
+                    x = geometry.right() - w + 1 if horizontal == "left" else geometry.x()
+                    y = geometry.bottom() - h + 1 if vertical == "top" else geometry.y()
+                    root.setGeometry(x, y, w, h)
+                event.accept()
+                return
             horizontal, vertical = self.region(event)
             if horizontal and vertical:
                 diagonal = (horizontal == "left") == (vertical == "top")
@@ -637,17 +677,12 @@ def graphical(listener):
             handle = self.window().windowHandle()
             if handle and event.button() == Qt.LeftButton:
                 horizontal, vertical = self.region(event)
-                edges = {"left": Qt.LeftEdge, "right": Qt.RightEdge}.get(horizontal)
-                if vertical:
-                    edge = Qt.TopEdge if vertical == "top" else Qt.BottomEdge
-                    edges = edge if edges is None else edges | edge
-                if edges is None:
-                    move = getattr(handle, "startSystemMove", None)
-                    accepted = move and move()
-                else:
-                    resize = getattr(handle, "startSystemResize", None)
-                    accepted = resize and resize(edges)
-                if accepted:
+                if horizontal or vertical:
+                    self.drag = self.pointer(event), root.geometry(), horizontal, vertical
+                    event.accept()
+                    return
+                move = getattr(handle, "startSystemMove", None)
+                if move and move():
                     event.accept()
                     return
             super().mousePressEvent(event)
@@ -681,6 +716,8 @@ def graphical(listener):
     class PhaseLabel(ElidedLabel):
         def display_text(self):
             if editor.isHidden() and status.text():
+                if GPU_PAUSED in status.text():
+                    return "GPU paused"
                 return "Copied" if status.text().endswith(" · Copied to clipboard") else status.text()
             return self.text()
 
@@ -794,14 +831,6 @@ def graphical(listener):
                 painter.drawLine(corner, -corner, reach, -corner)
                 painter.drawLine(corner, -corner, corner, -reach)
                 painter.restore()
-        elif symbol == "pin":
-            painter.drawLine(8, 4, 16, 4)
-            painter.drawLine(9, 4, 9, 10)
-            painter.drawLine(15, 4, 15, 10)
-            painter.drawLine(9, 10, 6, 14)
-            painter.drawLine(15, 10, 18, 14)
-            painter.drawLine(6, 14, 18, 14)
-            painter.drawLine(12, 14, 12, 21)
         elif symbol == "mic":
             painter.drawRoundedRect(9, 2, 6, 12, 3, 3)
             painter.drawArc(5, 5, 14, 13, 180 * 16, 180 * 16)
@@ -1116,6 +1145,8 @@ def graphical(listener):
                 if editor.isReadOnly():
                     editor.setReadOnly(False)
                 message, replace_session = value
+                if message == GPU_PAUSED and tray.isVisible() and tray.supportsMessages():
+                    tray.showMessage("InnerVoice · GPU paused", GPU_PAUSED)
                 state["sync_error"] = message
                 state["replace_session"] = replace_session
                 save()
@@ -1278,32 +1309,6 @@ def graphical(listener):
     expand_button = icon_button("Expand editor", "expand")
     expand_button.clicked.connect(toggle_size)
     header.addWidget(expand_button)
-    pin = icon_button("Always on top", "pin")
-    pin.setCheckable(True)
-    pin.setChecked(pinned)
-    pin.setToolTip("Request always on top (depends on your window manager)")
-    header.addWidget(pin)
-
-    def change_pin(enabled):
-        try:
-            atomic(pin_path, b"1" if enabled else b"0")
-        except OSError:
-            with QSignalBlocker(pin):
-                pin.setChecked(not enabled)
-            status.setText("Could not save always-on-top preference")
-            return
-        visible, window_state = root.isVisible(), root.windowState()
-        geometry = root.geometry()
-        root.setWindowFlag(Qt.WindowStaysOnTopHint, enabled)
-        if wayland:
-            root.resize(geometry.size())
-        else:
-            root.setGeometry(geometry)
-        root.setWindowState(window_state)
-        if visible:
-            root.show()
-
-    pin.toggled.connect(change_pin)
     more = QPushButton("⋯")
     more.setAccessibleName("More controls")
     more.setToolTip("More controls")
