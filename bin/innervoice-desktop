@@ -7,7 +7,7 @@ if [[ "$action" == help || "$action" == --help || "$action" == -h ]]; then
 InnerVoice desktop
 
   install     Guide first-time setup and add InnerVoice to your applications.
-  open        Start the recorder if needed and show its editor.
+  open        Launch the pill, or show the editor if already running.
   setup       Verify the gateway and save this workstation's settings.
   start       Start with the saved settings.
   update      Build the current desktop code and start it.
@@ -65,10 +65,7 @@ fi
 if [[ "$action" == open ]]; then
     if "$repo_dir/bin/innervoice-desktop" show 2>/dev/null; then exit; fi
     if "$repo_dir/bin/innervoice-desktop" start; then
-        for ((attempt=0; attempt<20; attempt++)); do
-            if "$repo_dir/bin/innervoice-desktop" show 2>/dev/null; then exit; fi
-            sleep 0.25
-        done
+        exit 0
     fi
     if command -v notify-send >/dev/null; then
         notify-send "InnerVoice" "Recorder unavailable. Run innervoice-desktop status and logs from the checkout." || true

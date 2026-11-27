@@ -21,6 +21,20 @@ import desktop
 
 
 class WaylandDesktopTests(unittest.TestCase):
+    def test_native_resize_regions(self):
+        for x, horizontal in ((0, "left"), (70, ""), (139, "right")):
+            for y, vertical in ((1, "top"), (32, ""), (63, "bottom")):
+                self.assertEqual(desktop.resize_region(x, y, 140, 64), (horizontal, vertical))
+        self.assertEqual(desktop.resize_region(8, 8, 140, 64), ("", ""))
+
+    def test_topmost_preference_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "always-on-top"
+            self.assertFalse(desktop.pin_requested(path))
+            for value, expected in ((b"1", True), (b"0", False), (b"\xff", False)):
+                path.write_bytes(value)
+                self.assertEqual(desktop.pin_requested(path), expected)
+
     def test_user_corrections_survive_preview_and_final_revisions(self):
         raw = "Meet Ana at noon"
         edited = "Meet Anna at noon"
@@ -186,6 +200,30 @@ class WaylandDesktopTests(unittest.TestCase):
             self.assertEqual(command.splitlines()[-6:],
                              ["exec", "-T", "desktop", "/opt/innervoice/bin/python", "/app/desktop.py", "toggle"])
 
+    def test_app_launcher_cold_start_leaves_pill_and_warm_open_shows_editor(self):
+        launcher = ROOT / "bin" / "innervoice-desktop"
+        with tempfile.TemporaryDirectory() as tmp:
+            # Exercise the open dispatcher while standing in for its child invocations.
+            bindir = Path(tmp) / "bin"
+            bindir.mkdir()
+            dispatcher = bindir / "open-dispatcher"
+            dispatcher.write_bytes(launcher.read_bytes())
+            child = bindir / "innervoice-desktop"
+            child.write_text("""#!/bin/sh
+echo "$1" >> "$HOME/calls"
+case "$1" in
+    show) test -f "$HOME/running" ;;
+    start) touch "$HOME/running" ;;
+esac
+""")
+            child.chmod(0o700)
+            env = dict(os.environ, HOME=tmp)
+            calls = Path(tmp) / "calls"
+            subprocess.run(["bash", dispatcher, "open"], env=env, check=True)
+            self.assertEqual(calls.read_text().splitlines(), ["show", "start"])
+            subprocess.run(["bash", dispatcher, "open"], env=env, check=True)
+            self.assertEqual(calls.read_text().splitlines(), ["show", "start", "show"])
+
     def test_host_network_is_an_explicit_compose_override(self):
         launcher = ROOT / "bin" / "innervoice-desktop"
         with tempfile.TemporaryDirectory() as directory:
@@ -314,6 +352,7 @@ class WaylandDesktopTests(unittest.TestCase):
             attempts = []
             def network(_, directory, ___, events, finished):
                 attempts.append(directory)
+                events.put(("session", "sample"))
                 events.put(("preview", (0, "Draft words")))
                 if len(attempts) == 1 and user_edited.wait(1):
                     events.put(("preview", (0, "Draft words continued")))
@@ -338,7 +377,7 @@ class WaylandDesktopTests(unittest.TestCase):
                 for widget in app.topLevelWidgets():
                     editor = widget.findChild(QtWidgets.QTextEdit)
                     if editor is not None and "startup" not in observed:
-                        observed["startup"] = (widget.isVisible() and editor.isVisible() and editor.height() >= 72
+                        observed["startup"] = (widget.isVisible() and not editor.isVisible() and widget.height() == 64
                                                and bool(widget.windowFlags() & QtCore.Qt.FramelessWindowHint)
                                                and not editor.toPlainText()
                                                and editor.placeholderText() == "Ready when you are")
@@ -374,18 +413,43 @@ class WaylandDesktopTests(unittest.TestCase):
                             return next(b for b in widget.findChildren(QtWidgets.QPushButton)
                                         if b.accessibleName() == name)
                         normal_size = widget.size()
+                        observed["compact_delivery"] = normal_size.height() == 64 and not editor.isVisible()
+                        observed["hidden_metric"] = "first_text" not in [call.args[0] for call in metrics.call_args_list]
+                        observed["passive"] = not activate.called
+                        actions = control("More controls").menu()
+                        actions.aboutToShow.emit()
+                        observed["overflow"] = {"Copy", "Play recording", "Local recording history",
+                                                "Task and live text"} <= {a.text() for a in actions.actions()}
+                        pin = control("Always on top")
+                        pin.click()
+                        observed["pin"] = ((home / "always-on-top").read_bytes() == b"1"
+                                           and bool(widget.windowFlags() & QtCore.Qt.WindowStaysOnTopHint)
+                                           and widget.size() == normal_size)
+
                         control("Expand editor").click()
                         app.processEvents()
                         expanded_size = widget.size()
-                        control("Restore automatic size").click()
+                        control("Collapse editor").click()
                         app.processEvents()
                         observed["maximized"] = (expanded_size.width() == 520 and expanded_size.height() == 280
                                                   and widget.height() == normal_size.height())
+                        widget.resize(600, 220)
+                        app.processEvents()
+                        observed["manual"] = editor.isVisible()
                         editor.setPlainText("Long dictation with wrapping. " * 400)
                         widget.showNormal()
                         for _ in range(5):
                             app.processEvents()
-                        observed["bounded"] = widget.size() == expanded_size and editor.verticalScrollBar().maximum() > 0
+                        observed["bounded"] = widget.size() == QtCore.QSize(600, 220) and editor.verticalScrollBar().maximum() > 0
+                        editor.selectAll()
+                        selected = editor.textCursor().selectedText()
+                        widget.resize(600, 64)
+                        app.processEvents()
+                        observed["width_only"] = not editor.isVisible()
+                        control("Expand editor").click()
+                        app.processEvents()
+                        observed["restored"] = (widget.size() == QtCore.QSize(600, 220)
+                                                and bool(selected) and editor.textCursor().selectedText() == selected)
                         widget.close()
                         observed["closed"] = not widget.isVisible()
                         widget.show()
@@ -429,19 +493,26 @@ class WaylandDesktopTests(unittest.TestCase):
             with patch.dict(os.environ, env):
                 app = QtWidgets.QApplication([])
                 QtCore.QTimer.singleShot(30, inspect_editor)
-                QtCore.QTimer.singleShot(11000, lambda: app.exit(0))
+                watchdog = QtCore.QTimer()
+                watchdog.setSingleShot(True)
+                watchdog.timeout.connect(lambda: app.exit(0))
+                watchdog.start(11000)
                 with (
                     patch.object(QtWidgets, "QApplication", return_value=app),
                     patch.object(desktop, "HOME", home),
                     patch.object(desktop, "CONFIG", config),
+                    patch.object(QtWidgets.QWidget, "activateWindow") as activate,
+                    patch.object(desktop, "metric") as metrics,
                     patch.object(desktop, "capture", side_effect=capture),
                     patch.object(desktop, "network", side_effect=network),
                 ):
                     desktop.graphical(listener)
+                watchdog.stop()
             self.assertTrue(observed.get("retried"))
             self.assertEqual(len(set(attempts)), 2)
             self.assertEqual(observed.get("auto"), "Test note")
-            for condition in ("startup", "ordinary", "after_auto", "after_copy"):
+            for condition in ("startup", "ordinary", "after_auto", "after_copy", "compact_delivery", "manual", "pin",
+                              "hidden_metric", "passive", "overflow", "width_only", "restored"):
                 self.assertTrue(observed.get(condition), condition)
             self.assertEqual(observed.get("clipboard"), "Edited note")
             self.assertEqual(observed.get("history"), "Previous take")
@@ -466,11 +537,12 @@ class WaylandDesktopTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("IV_DESKTOP_QT") == "6", "desktop container uses Qt 6")
     def test_transport_retry_and_reprocess_controls(self):
-        from PySide6 import QtCore, QtWidgets
+        from PySide6 import QtCore, QtWidgets, QtTest
 
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             config = home / "settings.json"
+            (home / "always-on-top").write_bytes(b"1")
             config.write_text('{"microphone":"","ui_poll_ms":100}')
             app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
             listener = MagicMock()
@@ -503,8 +575,11 @@ class WaylandDesktopTests(unittest.TestCase):
                         events.put(("replacement", [{"text": "Reprocessed words"}]))
                         events.put(("ready", "Ready"))
 
+            existing = set(app.topLevelWidgets())
+
             def scenario():
-                window = next(w for w in app.topLevelWidgets() if w.objectName() == "recorderWindow")
+                window = next(w for w in app.topLevelWidgets()
+                              if w not in existing and w.objectName() == "recorderWindow")
                 editor = window.findChild(QtWidgets.QTextEdit)
                 def button(label):
                     return next((b for b in window.findChildren(QtWidgets.QPushButton)
@@ -517,10 +592,35 @@ class WaylandDesktopTests(unittest.TestCase):
                         yield
                     self.fail("Timed out waiting for the recorder control or result")
 
+                pin = button("Always on top")
+                self.assertTrue(pin.isChecked())
+                self.assertTrue(window.windowFlags() & QtCore.Qt.WindowStaysOnTopHint)
+                sheet = window.findChild(QtWidgets.QWidget, "surface")
+                handle = MagicMock()
+                with patch.object(window, "windowHandle", return_value=handle):
+                    for x, horizontal in ((1, QtCore.Qt.LeftEdge), (100, None),
+                                          (sheet.width() - 2, QtCore.Qt.RightEdge)):
+                        for y, vertical in ((1, QtCore.Qt.TopEdge), (10, None),
+                                            (sheet.height() - 2, QtCore.Qt.BottomEdge)):
+                            point = QtCore.QPoint(x, y)
+                            QtTest.QTest.mouseClick(sheet, QtCore.Qt.LeftButton, pos=point)
+                            if horizontal is None and vertical is None:
+                                handle.startSystemMove.assert_called_once_with()
+                            else:
+                                edges = horizontal or vertical
+                                if horizontal and vertical:
+                                    edges = horizontal | vertical
+                                handle.startSystemResize.assert_called_once_with(edges)
+                            handle.reset_mock()
+                button("Expand editor").click()
                 task = window.findChild(QtWidgets.QPushButton, "task")
                 next(a for a in task.menu().actions() if a.text() == "Transcribe Spanish").trigger()
                 self.assertIn("ES", task.text())
                 button("Record").click()
+                size = window.size()
+                pin.click()
+                self.assertEqual(window.size(), size)
+                self.assertEqual((home / "always-on-top").read_bytes(), b"0")
                 self.assertIsNone(button("Play recording"))
                 button("Pause recording").click()
                 play = yield from wait_for(lambda: button("Play recording"))
@@ -547,10 +647,10 @@ class WaylandDesktopTests(unittest.TestCase):
                 try:
                     next(steps)
                 except StopIteration:
-                    app.quit()
+                    app.exit(0)
                 except Exception as error:
                     failures.append(error)
-                    app.quit()
+                    app.exit(0)
                 else:
                     QtCore.QTimer.singleShot(30, tick)
 

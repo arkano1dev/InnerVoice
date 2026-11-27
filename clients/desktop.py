@@ -528,15 +528,29 @@ def run_graphical():
                 control.unlink(missing_ok=True)
 
 
+def resize_region(x, y, width, height):
+    """Classify the six logical pixels reserved for native resize gestures."""
+    horizontal = "left" if x < 6 else "right" if x >= width - 6 else ""
+    vertical = "top" if y < 6 else "bottom" if y >= height - 6 else ""
+    return horizontal, vertical
+
+
+def pin_requested(path):
+    try:
+        return path.read_bytes().strip() == b"1"
+    except OSError:
+        return False
+
+
 def graphical(listener):
     if os.environ.get('IV_DESKTOP_QT') == '6':
-        from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QEvent, QSize
+        from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QSize
         from PySide6.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
-        from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QSystemTrayIcon, QMenu
+        from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QSystemTrayIcon, QMenu, QSizePolicy, QLayout
     else:
-        from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QEvent, QSize
+        from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, QSocketNotifier, QPoint, QSize
         from PyQt5.QtGui import QTextCursor, QIcon, QPixmap, QColor, QPainter, QPalette, QPen, QPolygon, QCursor
-        from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QSystemTrayIcon, QMenu
+        from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget, QSystemTrayIcon, QMenu, QSizePolicy, QLayout
 
     cfg = json.loads(CONFIG.read_bytes())
     _, ui_poll_ms = delivery_intervals(cfg)
@@ -557,19 +571,15 @@ def graphical(listener):
             event.ignore()
             self.hide()
 
-        def mousePressEvent(self, event):
-            if event.button() == Qt.LeftButton and self.windowHandle().startSystemMove():
-                event.accept()
-                return
-            super().mousePressEvent(event)
+        def resizeEvent(self, event):
+            super().resizeEvent(event)
+            refresh_layout()
 
-        def event(self, event):
-            result = super().event(event)
-            if event.type() in (QEvent.LayoutRequest, QEvent.Show) and hasattr(self, "fit_timer"):
-                self.fit_timer.start()
-            return result
-
+    pin_path = HOME / "always-on-top"
+    pinned = pin_requested(pin_path)
     root = RecorderWindow(None, Qt.Window | Qt.FramelessWindowHint)
+    root.setWindowFlag(Qt.WindowStaysOnTopHint, pinned)
+    root.setAttribute(Qt.WA_ShowWithoutActivating)
     root.setObjectName("recorderWindow")
     root.setAttribute(Qt.WA_TranslucentBackground)
     root.setWindowTitle("InnerVoice")
@@ -591,6 +601,7 @@ def graphical(listener):
         QPushButton {background:#272c30;color:#eef3f1;border:1px solid #41494c;
                      border-radius:9px;padding:0;font-size:13px;font-weight:600}
         QPushButton:hover {background:#363e41}
+        QPushButton:checked {background:#40554e;border-color:#81baa9}
         QPushButton:pressed {background:#424b4d}
         QPushButton#record {background:#abd9c6;color:#152720}
         QPushButton#record[recording="true"] {background:#f2ada4;color:#311917}
@@ -604,17 +615,49 @@ def graphical(listener):
     outer = QVBoxLayout(root)
     outer.setContentsMargins(0, 0, 0, 0)
     class RecorderSurface(QWidget):
-        # The layout leaves this strip free around all four sides, including corners.
+        def region(self, event):
+            point = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            return resize_region(point.x(), point.y(), self.width(), self.height())
+
+        def mouseMoveEvent(self, event):
+            horizontal, vertical = self.region(event)
+            if horizontal and vertical:
+                diagonal = (horizontal == "left") == (vertical == "top")
+                cursor = Qt.SizeFDiagCursor if diagonal else Qt.SizeBDiagCursor
+            elif horizontal:
+                cursor = Qt.SizeHorCursor
+            elif vertical:
+                cursor = Qt.SizeVerCursor
+            else:
+                cursor = Qt.ArrowCursor
+            self.setCursor(cursor)
+            super().mouseMoveEvent(event)
+
         def mousePressEvent(self, event):
-            inner = self.rect().adjusted(12, 12, -12, -12)
-            if event.button() == Qt.LeftButton and not inner.contains(event.pos()):
-                handle = self.window().windowHandle()
-                if handle and handle.startSystemMove():
+            handle = self.window().windowHandle()
+            if handle and event.button() == Qt.LeftButton:
+                horizontal, vertical = self.region(event)
+                edges = {"left": Qt.LeftEdge, "right": Qt.RightEdge}.get(horizontal)
+                if vertical:
+                    edge = Qt.TopEdge if vertical == "top" else Qt.BottomEdge
+                    edges = edge if edges is None else edges | edge
+                if edges is None:
+                    move = getattr(handle, "startSystemMove", None)
+                    accepted = move and move()
+                else:
+                    resize = getattr(handle, "startSystemResize", None)
+                    accepted = resize and resize(edges)
+                if accepted:
                     event.accept()
                     return
             super().mousePressEvent(event)
 
+    # A visible editor's layout minimum must never trap the window above
+    # the collapse threshold during a native resize.
+    outer.setSizeConstraint(QLayout.SetNoConstraint)
+    root.setMinimumSize(380, 64)
     sheet = RecorderSurface()
+    sheet.setMouseTracking(True)
     sheet.setObjectName("surface")
     sheet.setAttribute(Qt.WA_StyledBackground)
     outer.addWidget(sheet)
@@ -624,15 +667,33 @@ def graphical(listener):
     header = QHBoxLayout()
     header.setSpacing(6)
     body.addLayout(header)
-    phase_label = QLabel("Ready")
+    class ElidedLabel(QLabel):
+        def paintEvent(self, event):
+            painter = QPainter(self)
+            painter.setFont(self.font())
+            painter.setPen(self.palette().color(self.foregroundRole()))
+            text = self.fontMetrics().elidedText(self.display_text(), Qt.ElideRight, self.width())
+            painter.drawText(self.rect(), Qt.AlignLeft | Qt.AlignVCenter, text)
+
+        def display_text(self):
+            return self.text()
+
+    class PhaseLabel(ElidedLabel):
+        def display_text(self):
+            if editor.isHidden() and status.text():
+                return "Copied" if status.text().endswith(" · Copied to clipboard") else status.text()
+            return self.text()
+
+    phase_label = PhaseLabel("Ready")
+    phase_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    phase_label.setMinimumWidth(55)
     phase_label.setObjectName("phase")
-    phase_label.setToolTip("Drag the edge to move InnerVoice")
+    phase_label.setAccessibleName("Recorder status")
     elapsed = QLabel("00:00")
     elapsed.setObjectName("clock")
     elapsed.setAccessibleName("Recording duration")
-    header.addWidget(phase_label)
+    header.addWidget(phase_label, 2)
     header.addWidget(elapsed)
-    header.addStretch()
 
     class Waveform(QWidget):
         """Monochrome bars show the latest PCM peaks, newest on the right."""
@@ -662,7 +723,10 @@ def graphical(listener):
             painter.end()
 
     meter = Waveform()
-    body.addWidget(meter)
+    header.addWidget(meter, 1)
+    for passive in (elapsed, meter):
+        passive.setAttribute(Qt.WA_TransparentForMouseEvents)
+    phase_label.setMouseTracking(True)
     editor = QTextEdit()
     editor.setAcceptRichText(False)
     editor.setAccessibleName("Transcript")
@@ -680,15 +744,18 @@ def graphical(listener):
     buttons.setContentsMargins(0, 0, 0, 0)
     buttons.setSpacing(6)
     body.addWidget(footer)
-    class RecorderStatus(QLabel):
+    class RecorderStatus(ElidedLabel):
         def setText(self, text):
             super().setText(text)
-            self.setVisible(bool(text))
+            self.setToolTip(text)
+            phase_label.setToolTip(text or phase_label.text())
+            phase_label.update()
+            self.setVisible(bool(text) and not editor.isHidden())
 
     status = RecorderStatus("")
     status.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
     status.setTextFormat(Qt.PlainText)
-    status.setWordWrap(True)
+    status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
     status.setMinimumWidth(0)
     body.addWidget(status)
     status.setText("")
@@ -727,6 +794,14 @@ def graphical(listener):
                 painter.drawLine(corner, -corner, reach, -corner)
                 painter.drawLine(corner, -corner, corner, -reach)
                 painter.restore()
+        elif symbol == "pin":
+            painter.drawLine(8, 4, 16, 4)
+            painter.drawLine(9, 4, 9, 10)
+            painter.drawLine(15, 4, 15, 10)
+            painter.drawLine(9, 10, 6, 14)
+            painter.drawLine(15, 10, 18, 14)
+            painter.drawLine(6, 14, 18, 14)
+            painter.drawLine(12, 14, 12, 21)
         elif symbol == "mic":
             painter.drawRoundedRect(9, 2, 6, 12, 3, 3)
             painter.drawArc(5, 5, 14, 13, 180 * 16, 180 * 16)
@@ -765,6 +840,8 @@ def graphical(listener):
         if root.isMinimized():
             root.setWindowState(root.windowState() & ~Qt.WindowMinimized)
         root.show()
+        if editor.isHidden():
+            toggle_size()
         root.raise_()
         root.activateWindow()
         first_visible()
@@ -804,7 +881,7 @@ def graphical(listener):
 
     def first_visible():
         if (timing.get("first") or root.isMinimized() or not root.isVisible()
-                or not editor.toPlainText().strip()):
+                or not editor.isVisible() or not editor.toPlainText().strip()):
             return
         timing["first"] = True
         if timing.get("session"):
@@ -832,10 +909,13 @@ def graphical(listener):
         save()
 
     editor.textChanged.connect(edited)
-    editor.textChanged.connect(lambda: root.fit_timer.start())
+
+    def refresh_copy():
+        copy_button.setVisible(bool(editor.toPlainText().strip()))
+
+    editor.textChanged.connect(refresh_copy)
 
     def revise(raw, final=False):
-        root.fit_timer.start()
         old = state.get("text", "")
         boundary = state.get("draft_start", len(old))
         prefix = old[:boundary]
@@ -856,6 +936,7 @@ def graphical(listener):
                 patch.setPosition(position(end), QTextCursor.KeepAnchor)
                 patch.insertText(text[start:new_end])
             bar.setValue(bar.maximum() if follow else scroll)
+        refresh_copy()
         state["text"] = text
         if final:
             state.pop("draft_raw", None)
@@ -929,6 +1010,7 @@ def graphical(listener):
         directory, state = new_directory, new_state
         with QSignalBlocker(editor):
             editor.clear()
+        refresh_copy()
         stop=threading.Event()
         finished=threading.Event()
         working=True
@@ -937,8 +1019,8 @@ def graphical(listener):
         args = (directory, stop, events, cfg["microphone"], pause)
         capture_thread = threading.Thread(target=capture, args=args + (block,) if streaming else args)
         capture_thread.start()
-        if streaming:
-            reveal()
+        if streaming and not root.isVisible() and not root.isMinimized():
+            root.show()
         transfer()
 
     pending_segments = []
@@ -1051,6 +1133,8 @@ def graphical(listener):
                 state.pop("draft_start", None)
                 with QSignalBlocker(editor):
                     editor.setPlainText(state["text"])
+                refresh_copy()
+                first_visible()
                 save()
             elif kind=="ready":
                 transfer_active = False
@@ -1158,7 +1242,7 @@ def graphical(listener):
     start_button.setIcon(record_symbol(False))
     start_button.setAccessibleName("Record")
     start_button.setToolTip("Start local recording")
-    start_button.setFixedSize(100, 36)
+    start_button.setFixedSize(74, 36)
     start_button.setObjectName("record")
     pause_button = icon_button("Pause recording", "pause")
     play_button = icon_button("Play recording", "play")
@@ -1172,7 +1256,8 @@ def graphical(listener):
     play_button.clicked.connect(play_or_stop)
     retry_button.clicked.connect(retry)
     copy_button.clicked.connect(copy_result)
-    for button in (start_button, pause_button, play_button, retry_button):
+    header.insertWidget(0, start_button)
+    for button in (pause_button, play_button, retry_button):
         buttons.addWidget(button)
     buttons.addStretch(1)
     buttons.addWidget(copy_button)
@@ -1180,19 +1265,82 @@ def graphical(listener):
     task_button = QPushButton()
     task_button.setObjectName("task")
     task_button.setFixedSize(66, 36)
-    header.addWidget(task_button)
-    expanded = False
+    buttons.addWidget(task_button)
+    expanded_size = QSize(520, 280)
 
     def toggle_size():
-        nonlocal expanded
-        expanded = not expanded
-        label = "Restore automatic size" if expanded else "Expand editor"
-        set_icon(expand_button, label, "restore" if expanded else "expand")
-        fit_pill()
+        if editor.isHidden():
+            area = root.screen().availableGeometry().size()
+            root.resize(expanded_size.boundedTo(area))
+        else:
+            root.resize(380, 64)
 
     expand_button = icon_button("Expand editor", "expand")
     expand_button.clicked.connect(toggle_size)
     header.addWidget(expand_button)
+    pin = icon_button("Always on top", "pin")
+    pin.setCheckable(True)
+    pin.setChecked(pinned)
+    pin.setToolTip("Request always on top (depends on your window manager)")
+    header.addWidget(pin)
+
+    def change_pin(enabled):
+        try:
+            atomic(pin_path, b"1" if enabled else b"0")
+        except OSError:
+            with QSignalBlocker(pin):
+                pin.setChecked(not enabled)
+            status.setText("Could not save always-on-top preference")
+            return
+        visible, window_state = root.isVisible(), root.windowState()
+        geometry = root.geometry()
+        root.setWindowFlag(Qt.WindowStaysOnTopHint, enabled)
+        if wayland:
+            root.resize(geometry.size())
+        else:
+            root.setGeometry(geometry)
+        root.setWindowState(window_state)
+        if visible:
+            root.show()
+
+    pin.toggled.connect(change_pin)
+    more = QPushButton("⋯")
+    more.setAccessibleName("More controls")
+    more.setToolTip("More controls")
+    more.setFixedSize(30, 36)
+    overflow = QMenu(more)
+    more.setMenu(overflow)
+    header.addWidget(more)
+
+    def build_overflow():
+        overflow.clear()
+        for button in (pause_button, play_button, retry_button, copy_button):
+            if not button.isHidden():
+                action = overflow.addAction(button.accessibleName(), button.click)
+                action.setEnabled(button.isEnabled())
+        recovery.setTitle("Local recording history")
+        task_menu.setTitle("Task and live text")
+        overflow.addMenu(recovery)
+        overflow.addMenu(task_menu)
+
+    overflow.aboutToShow.connect(build_overflow)
+
+    def refresh_layout():
+        nonlocal expanded_size
+        expanded = root.height() >= 210
+        if expanded:
+            expanded_size = root.size()
+        if expanded == editor.isHidden():
+            set_icon(expand_button, "Collapse editor" if expanded else "Expand editor",
+                     "restore" if expanded else "expand")
+        editor.setVisible(expanded)
+        footer.setVisible(expanded)
+        more.setVisible(not expanded)
+        status.setVisible(expanded and bool(status.text()))
+        phase_label.update()
+        if expanded:
+            first_visible()
+
     for button in (pause_button, play_button, retry_button):
         button.hide()
 
@@ -1222,7 +1370,7 @@ def graphical(listener):
         atomic(pointer, directory.name.encode())
         with QSignalBlocker(editor):
             editor.setPlainText(state.get("text", ""))
-        root.fit_timer.start()
+        refresh_copy()
         stop.set()
         finished.set()
         play_button.setVisible(audio_available())
@@ -1328,39 +1476,9 @@ def graphical(listener):
     else:
         timer.timeout.connect(lambda: read_shortcuts(listener, events))
     screen = app.screenAt(QCursor.pos()) or app.primaryScreen()
-    def fit_pill():
-        if root.isMinimized():
-            return
-        available = (root.screen() or screen).availableGeometry()
-        max_width = min(520, available.width())
-        max_height = min(280, available.height())
-        document = editor.document()
-        length = document.characterCount() - 1
-        copy_button.setVisible(bool(editor.toPlainText().strip()))
-        margins = body.contentsMargins()
-        padding = margins.left() + margins.right()
-        width = max_width if expanded else min(max_width, max(
-            footer.minimumSizeHint().width() + padding, 380 + min(140, length)))
-        body.activate()
-        desired = (margins.top() + margins.bottom() + 3 * body.spacing() +
-                   header.sizeHint().height() + meter.height() + footer.sizeHint().height() +
-                   max(editor.minimumHeight(), int(document.size().height()) + 15))
-        if not status.isHidden():
-            desired += body.spacing() + max(status.fontMetrics().height(), status.heightForWidth(max(1, width - padding)))
-        height = max_height if expanded else min(max_height, desired)
-        if root.width() != width or root.height() != height:
-            root.resize(width, height)
-            # Wayland places top-level surfaces. Other backends allow us to
-            # keep the growing pill inside the current monitor's work area.
-            if root.isVisible() and not wayland:
-                root.move(max(available.left(), min(root.x(), available.right()-width+1)),
-                          max(available.top(), min(root.y(), available.bottom()-height+1)))
-
-    root.fit_timer = QTimer(root)
-    root.fit_timer.setSingleShot(True)
-    root.fit_timer.timeout.connect(fit_pill)
-    editor.document().documentLayout().documentSizeChanged.connect(lambda _: root.fit_timer.start())
-    fit_pill()
+    refresh_copy()
+    root.resize(380, 64)
+    refresh_layout()
     if not wayland:
         area = screen.availableGeometry()
         root.move(area.center().x() - root.width() // 2, area.center().y() - root.height() // 2)
@@ -1368,7 +1486,6 @@ def graphical(listener):
     sheet.setProperty("glass", root.windowHandle().format().alphaBufferSize() > 0)
     sheet.style().unpolish(sheet)
     sheet.style().polish(sheet)
-    root.windowHandle().screenChanged.connect(lambda _: root.fit_timer.start())
     try:
         if os.environ.get("IV_DESKTOP_QT") == "6":
             app.exec()
